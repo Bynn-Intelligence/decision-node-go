@@ -124,8 +124,11 @@ type BatchResult struct {
 	Err error
 	// Headers holds the line's headers, by lower-case name.
 	Headers map[string]string
-	// Raw is the line as sent.
+	// Raw is the line as parsed.
 	Raw map[string]any
+	// RawJSON is the line exactly as the server sent it, without its
+	// line ending.
+	RawJSON json.RawMessage
 }
 
 // BatchService is the Batch API: decide requests run asynchronously at
@@ -355,8 +358,9 @@ func (r *BatchResultsReader) Next() bool {
 				return false
 			}
 		}
-		line = bytes.TrimSpace(line)
-		if len(line) == 0 {
+		// The line without its ending; a line of only whitespace is skipped.
+		line = bytes.TrimSuffix(bytes.TrimSuffix(line, []byte("\n")), []byte("\r"))
+		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
 		res, perr := parseBatchResult(line)
@@ -653,7 +657,7 @@ func parseBatchResult(line []byte) (BatchResult, error) {
 	if err := json.Unmarshal(line, &shape); err != nil {
 		return BatchResult{}, err
 	}
-	r := BatchResult{CustomID: shape.CustomID, Headers: map[string]string{}, Raw: raw}
+	r := BatchResult{CustomID: shape.CustomID, Headers: map[string]string{}, Raw: raw, RawJSON: json.RawMessage(line)}
 	header := http.Header{}
 	for k, v := range shape.Headers {
 		r.Headers[strings.ToLower(k)] = v

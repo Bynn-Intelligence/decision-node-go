@@ -413,3 +413,26 @@ func TestSessionSocketUsesTheClientTransport(t *testing.T) {
 		t.Fatalf("got %#v", ev)
 	}
 }
+
+func TestBatchResultRawJSONIsByteIdentical(t *testing.T) {
+	lines := []string{
+		`{"custom_id":"count-1","status":200,"body":{"model":"decisionnode-1.0","answers":{"cars":{"type":"number","number":7,"expected":7.0,"confidence":0.78,"probabilities":{"8":0.098,"6":0.105,"7":0.783}}},"usage":{"input_tokens":300,"output_tokens":0}},"headers":{"x-request-id":"req_1"}}`,
+		`{"custom_id":"t2" , "status":"expired","body":null,"headers":{}}`,
+	}
+	srv, _ := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, lines[0]+"\n"+lines[1]+"\r\n")
+	})
+	got, err := client(t, srv.URL).Batches().Results(context.Background(), "batch_0123456789")
+	if err != nil || len(got) != 2 {
+		t.Fatal(got, err)
+	}
+	for i := range lines {
+		if string(got[i].RawJSON) != lines[i] {
+			t.Fatalf("line %d:\ngot  %s\nwant %s", i, got[i].RawJSON, lines[i])
+		}
+	}
+	if got[0].Decision.Number("cars").Expected != 7 || got[1].StatusText != "expired" {
+		t.Fatal("parsed fields")
+	}
+}
