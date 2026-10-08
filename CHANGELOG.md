@@ -10,8 +10,8 @@ Implements version 1.2 of the DecisionNode SDK surface: sixteen images, videos a
 
 ### Added
 
-- Point and box questions: `Point`, `PointWith`, `Box` and `BoxWith` (`Question.Image` names the image to look in, `Question.Units` is `pixels` or `normalized`), and the answers `PointAnswer` (`X`, `Y`, `Present`, `Confidence`, `Image`, `Width`, `Height`) and `BoxAnswer` (`X1`, `Y1`, `X2`, `Y2` and the same), read with `Decision.Point` and `Decision.Box`. An answer with a field missing or of the wrong type is an `UnknownAnswer`. Their rules are checked locally with the API's 422 entries: an image in the request, `image` naming one of them (required with two or more), and the units; a point or box without instructions is the API's 400. `Systemone` refuses both types locally, like number questions.
-- Videos sent as the frames the caller sampled: `Video` (`ID`, `Frames`, and the optional `FPS`, `Start` and `End`), `VideoFrame` built with `VideoFrameData` (bytes, the media type taken from the first bytes when not given) and `VideoFrameBase64` (base64 text sent as given), and `Request.Videos`, which also takes a video in its JSON wire form. `Systemone`, the helper requests, `DecideMany`, batch requests and `CheckDecide` take videos as `Decide` does. Frames always go inline: they are never uploaded, cached, resized or re-encoded.
+- Point and box questions: `Point`, `PointWith`, `Box` and `BoxWith` (`Question.Image` names the image to look in, `Question.Units` is `pixels` or `normalized`), and the answers `PointAnswer` (`X`, `Y`, `Present`, `Confidence`, `Image`, `Width`, `Height`) and `BoxAnswer` (`X1`, `Y1`, `X2`, `Y2` and the same), read with `Decision.Point` and `Decision.Box`. An answer with a field missing or of the wrong type is an `UnknownAnswer`. Their rules are checked locally with the API's 422 entries: an image in the request, `image` naming one of them (required with two or more), and the units; a point or box without instructions is the API's 400.
+- Videos sent as the frames the caller sampled: `Video` (`ID`, `Frames`, and the optional `FPS`, `Start` and `End`), `VideoFrame` built with `VideoFrameData` (bytes, the media type taken from the first bytes when not given) and `VideoFrameBase64` (base64 text sent as given), and `Request.Videos`, which also takes a video in its JSON wire form. The helper requests, `DecideMany`, batch requests and `CheckDecide` take videos as `Decide` does. Frames always go inline: they are never uploaded, cached, resized or re-encoded.
 - The API's video rules are checked before anything is sent, with the API's own message: an id that is present and unique across images and videos, at least one frame, frame times at least 0 and strictly increasing, a JPEG, PNG or WebP media type for every frame, `FPS` above 0 and at most 4, `Start` and `End` at least 0 and `End` after `Start`. The number of frames, their sizes and their pixels are left to the server.
 - `Usage.VideoFrames` and `Usage.VideoSeconds`, nil for a request without videos, and `Decision.Warnings`, the server's notes exactly as sent, empty when there are none.
 - `MaxVideos` and `MaxVideoFPS`.
@@ -29,7 +29,6 @@ Implements version 1.1 of the DecisionNode SDK surface: every public call.
 ### Added
 
 - Number questions: `Number` and `NumberWith` builders (`Min`, `Max` and `Step` on `Question`), `NumberAnswer` with `Number`, `Expected`, `Confidence` and `Probabilities` keyed by value as sent, `Decision.Number`, and the `Client.Number` helper.
-- `Client.Systemone` for `POST /v1/systemone`, which writes truth questions with that path's wire type.
 - Images: `ImageBase64`, `ImageReader` and `ImageUpload`; `Image.MediaType`; `Client.Upload`. Local images are sent inline under `DefaultInlineThreshold` (524,288 bytes, changed with `WithInlineThreshold`) and uploaded at or above it, with one presign per request and the uploads in parallel. Uploads are cached in memory by content hash until 5 minutes before they expire, never uploaded twice at once, and uploaded again once when the server reports one stale.
 - Sessions: `Client.OpenSession`, `Session.Connect`, `Send`, `Next`, `Replies`, `End` and `Close`, the events `Reply`, `FrameError` and `SessionClosed`, and `Client.Supervise`.
 - The Batch API: `Client.Batches` with `Create`, `Add` (split at 10 MiB), `Finalize`, `Get`, `List`, `Results` and `Cancel`, and `Client.RunBatch`.
@@ -41,7 +40,7 @@ Implements version 1.1 of the DecisionNode SDK surface: every public call.
 - `Ptr`, for the optional fields where 0 or "" differs from not given.
 - Every fixed rule the API documents is checked locally, in the server's order, with the error type the server sends: question shapes and types, value types, number grids, nesting, image URLs (`image_url_refused`), session window and lifetime, frames (`Session.Send` writes nothing and uses no seq for a refused frame), batch custom ids and list paging, and, after `Models`, the limits only that list states.
 - An upload refused 403 after its URL's lifetime is presigned again once.
-- Public checks that run every local check of a call and send nothing: `CheckDecide`, `CheckSystemone`, `CheckSession`, `CheckBatchCreate`, `CheckBatchAdd` and `Session.CheckFrame`.
+- Public checks that run every local check of a call and send nothing: `CheckDecide`, `CheckSession`, `CheckBatchCreate`, `CheckBatchAdd` and `Session.CheckFrame`.
 - `BatchService.ResultsReader` and `BatchResultsReader` read a batch's results line by line as they arrive; `Results` uses it and still returns the whole list.
 - `BatchResult.RawJSON`: the result line exactly as the server sent it, without its line ending.
 - `WithUploadTimeout` (default `DefaultUploadTimeout`, 60 s) bounds each storage PUT attempt apart from the API timeout.
@@ -54,7 +53,6 @@ Implements version 1.1 of the DecisionNode SDK surface: every public call.
 - `SpecVersion` is `"1.1"`.
 - `SessionRequest.Window` and `TTLSeconds`, `BatchRequest.CustomID` and `BatchListOptions.Offset` and `Limit` are pointers, so an explicit 0 or "" is sent and checked rather than taken as not given.
 - Every request is checked locally before anything is sent. A fault in its content (an image's format, size or pixel count, too many images or options or levels, a truth without text, a number grid the API would refuse) is the API's own `*BadRequestError` or `*ValidationError`, with no status and no request id. Image bytes of an unknown format were an argument error before; `ImageFile` no longer refuses a readable file of another format, the call does.
-- An answer of wire type `noul` is read into a `TruthAnswer`.
 - The default transport keeps more idle connections, uses larger buffers, prefers HTTP/2 and resumes TLS sessions.
 - Batch create, add and finalize are retried only on 429 and 529.
 

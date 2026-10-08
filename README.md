@@ -106,7 +106,7 @@ fmt.Println(p.X, p.Y, p.Present)           // 812 455 0.97
 fmt.Println(b.X1, b.Y1, b.X2, b.Y2, b.Image) // 300 120 520 410 belt
 ```
 
-`X` and `Y` are measured from the top-left corner of the image, `X` to the right and `Y` down; a box runs from its top-left corner (`X1`, `Y1`) to its bottom-right corner (`X2`, `Y2`). `units` is `"pixels"` (the default: whole pixels of the image as sent) or `"normalized"` (fractions of the width and the height). `Present` is the probability that what the instructions describe is in the image at all; `Confidence` the probability that the place is right if it is. `Image`, `Width` and `Height` name the image looked in and its size in pixels. The request needs an image, and `image` names the one to look in when it carries two or more (`""` leaves it out). `Systemone` takes neither type.
+`X` and `Y` are measured from the top-left corner of the image, `X` to the right and `Y` down; a box runs from its top-left corner (`X1`, `Y1`) to its bottom-right corner (`X2`, `Y2`). `units` is `"pixels"` (the default: whole pixels of the image as sent) or `"normalized"` (fractions of the width and the height). `Present` is the probability that what the instructions describe is in the image at all; `Confidence` the probability that the place is right if it is. `Image`, `Width` and `Height` name the image looked in and its size in pixels. The request needs an image, and `image` names the one to look in when it carries two or more (`""` leaves it out).
 
 `State`, instructions, descriptions and levels take a string or any value that encodes to JSON: a struct, a map, a slice or a `json.RawMessage`. A question in its JSON wire form, such as a `map[string]any`, works wherever a builder does:
 
@@ -129,7 +129,6 @@ Numbers are passed through exactly as received: a probability list may read 0.82
 | `Score(ctx, dn.ScoreRequest)` | One score question. Returns a `*ScoreAnswer`. |
 | `Number(ctx, dn.NumberRequest)` | One number question, with the id `number`. Returns a `*NumberAnswer`. |
 | `Gate(ctx, dn.GateRequest)` | Judges an action before it runs: `risk` (score), `touches_production` (truth) and `verdict` (allow, confirm or block). |
-| `Systemone(ctx, dn.Request)` | One request to `POST /v1/systemone`, the strict path for truth, choice and score questions. Returns a `*Decision` read like `Decide`'s. |
 | `Upload(ctx, images)` | Uploads local images whatever their size and returns a `dn.UploadResult` for each (`ID`, `ExpiresAt`), to name them later with `dn.ImageUpload`. |
 | `EndSession(ctx, id)` | Ends a session by its id, sent once and never retried; an already ended session is success with a nil summary. |
 | `OpenSession(ctx, dn.SessionRequest)` | Opens a session. Returns a `*Session`; see [Sessions](#sessions). |
@@ -142,8 +141,6 @@ Numbers are passed through exactly as received: a probability list may read 0.82
 `Check`, `Classify`, `Score`, `Number` and `Gate` take `Images`, `Videos` and `Model` like `Decide`. `Check`, `Classify`, `Score` and `Number` promise a typed answer, so when their own answer is missing or malformed they return a `*ServerError` with the response's status, `RequestID` and `Reason`. `Decide` returns such an answer as an `*UnknownAnswer` instead.
 
 A `*Decision` holds `Answers`, `Model` (the resolved version), `Usage.InputTokens` and `Usage.OutputTokens` (`*int`), `RequestID`, `LatencyMs` (`*float64`, the server's time), `Safety`, `Warnings` and `Raw` (the parsed body). For a request with videos, `Usage.VideoFrames` (`*int`) is the number of frames read and `Usage.VideoSeconds` (`*float64`) the seconds of the windows read, and `Warnings` holds the server's notes exactly as sent when it read a video at a lower rate or resolution than asked (empty, never nil, when there are none). A value the server did not send is `nil`, never 0.
-
-An answer the server sent with the wire type `noul` (every `Systemone` truth answer) is read into a `*TruthAnswer` too.
 
 `dn.SpecVersion` is the version of the DecisionNode SDK specification this package implements, `"1.2"`.
 
@@ -207,7 +204,7 @@ fmt.Println(d.Truth("fall").Truth, d.Number("forklifts").Number, d.Warnings)
 | `dn.VideoFrameBase64(t, text, mediaType)` | A frame given as base64 text, sent as given, with its media type. |
 | `dn.Video{ID, Frames, FPS, Start, End}` | A video: its id (unique across the request's images and videos), its frames with strictly increasing times, and optionally `FPS` (the most frames a second to read, above 0 and at most 4; the server's default is 2) and the window `[Start, End)` on the frames' own times, set with `dn.Ptr(2.0)`. |
 
-`Request.Videos` holds up to 4 videos, each a `dn.Video` or a video in its JSON wire form (a `map[string]any` or a `json.RawMessage`), checked by the same rules. `Systemone`, the helpers, `DecideMany` and batch requests take videos as `Decide` does; sessions do not. Frames always go inline: they are never uploaded or cached, and no frame is resized or re-encoded. The checks above run before anything is sent; how many frames a request may carry, their sizes and their pixels are the server's to judge. To turn a video file into frames, use the `dn` command line tool: `dn --video dock.mp4`.
+`Request.Videos` holds up to 4 videos, each a `dn.Video` or a video in its JSON wire form (a `map[string]any` or a `json.RawMessage`), checked by the same rules. The helpers, `DecideMany` and batch requests take videos as `Decide` does; sessions do not. Frames always go inline: they are never uploaded or cached, and no frame is resized or re-encoded. The checks above run before anything is sent; how many frames a request may carry, their sizes and their pixels are the server's to judge. To turn a video file into frames, use the `dn` command line tool: `dn --video dock.mp4`.
 
 ### Safety
 
@@ -345,7 +342,7 @@ The server never sees a request the client could have refused. Every fixed rule 
 
 | Fault | Returned as |
 |---|---|
-| more than 128 objects and arrays inside each other; an unknown question type (a number question on `Systemone` included) | `*BadRequestError`, `ErrorType` `api_usage_error`, "Invalid request." |
+| more than 128 objects and arrays inside each other; an unknown question type | `*BadRequestError`, `ErrorType` `api_usage_error`, "Invalid request." |
 | a question that is not an object or has no type; instructions, a state, an option description, a level or a truth side that is not a string, an object or an array; a choice or score without criteria, of the wrong shape, or a score with no level; a number grid that cannot be built (a bound not a number, beyond 2^53, more than 6 decimals, `step` not above 0, `min` above `max`, more than 4,096 values); a point or box in a request without images, without `image` among two or more images, or naming no image of the request, or with `units` other than `pixels` and `normalized`; a session `Window` or `TTLSeconds` out of range | `*ValidationError` with the API's entries, empty `ErrorType` |
 | a choice with no option or more than 255, a score over 10 levels, a truth without instructions or criteria, a number, point or box without instructions | `*BadRequestError` with the API's message and an empty `ErrorType` |
 | more than 16 images or more than 4 videos | `*ValidationError` with the API's `too_long` entry on `["body", "images"]` or `["body", "videos"]`, after the request's other entries; a local image is listed by its id and media type, without its bytes |
@@ -354,7 +351,7 @@ The server never sees a request the client could have refused. Every fixed rule 
 | an `https` image URL over 2,048 characters, with user information, on a port other than 443, or naming a private address | `*BadRequestError`, `image_url_refused` |
 | a batch line without a valid or unique `CustomID`, an `Add` with no requests, a `List` page out of range | `*BadRequestError`, `api_usage_error` |
 
-To validate input without sending it, call the check that matches the call: `client.CheckDecide(req)`, `CheckSystemone(req)`, `CheckSession(sessionRequest)`, `CheckBatchCreate(requests)`, `CheckBatchAdd(requests)` or `session.CheckFrame(frame)`. Each runs every local check the call would run, returns the same error, and sends and uploads nothing; nil means the call would send the request.
+To validate input without sending it, call the check that matches the call: `client.CheckDecide(req)`, `CheckSession(sessionRequest)`, `CheckBatchCreate(requests)`, `CheckBatchAdd(requests)` or `session.CheckFrame(frame)`. Each runs every local check the call would run, returns the same error, and sends and uploads nothing; nil means the call would send the request.
 
 After a call to `Models`, the client also checks the limits only that list states, for a model named by its entry's name, alias or pinned version: a model that answers no number questions or serves no sessions, a lower `max_window`, the batch's `requests_per_batch` and `max_custom_id_chars`. In `DecideMany` and a batch, a fault in any request fails the whole call. Token counts and anything that depends on the server's state are left to the API.
 
@@ -390,7 +387,7 @@ An option wins over the environment, and the environment over the default. The b
 DECISIONNODE_CONFORMANCE_DIR=/path/to/decision-node-conformance go test ./...
 ```
 
-The conformance tests run every case of the DecisionNode conformance suite against its mock server, and need `python3` for that server. `DECISIONNODE_CONFORMANCE_DIR` must point at a checkout of the suite: when it is unset the conformance test fails, it is never skipped. To run only the unit tests, pass `-skip TestConformance`. This version passes conformance suite 1.9; CI checks the suite out at the commit named once, in `CONFORMANCE_REF` in `.github/workflows/ci.yml`, with every action pinned to a commit and no credentials left in the checkouts.
+The conformance tests run every case of the DecisionNode conformance suite against its mock server, and need `python3` for that server. `DECISIONNODE_CONFORMANCE_DIR` must point at a checkout of the suite: when it is unset the conformance test fails, it is never skipped. To run only the unit tests, pass `-skip TestConformance`. This version passes conformance suite 1.10; CI checks the suite out at the commit named once, in `CONFORMANCE_REF` in `.github/workflows/ci.yml`, with every action pinned to a commit and no credentials left in the checkouts.
 
 ## License
 

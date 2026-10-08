@@ -3,7 +3,6 @@ package decisionnode
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 )
@@ -50,7 +49,7 @@ func (p *prepared) body(wires [][]byte) []byte {
 // that cannot be encoded) is a plain error; a request the API would refuse
 // for its content is the API's own error class. customID, when not nil,
 // makes the body a batch line.
-func (c *Client) prepare(req Request, systemone bool, customID *string) (*prepared, error) {
+func (c *Client) prepare(req Request, customID *string) (*prepared, error) {
 	// A batch line's custom_id is checked by checkLines before this.
 	if len(req.Questions) == 0 {
 		return nil, errors.New("decisionnode: questions must hold at least one question")
@@ -76,7 +75,7 @@ func (c *Client) prepare(req Request, systemone bool, customID *string) (*prepar
 	if !isSDL(stateJSON) && !isNull(stateJSON) {
 		qc.sdl([]any{"body", "state"}, stateJSON, "state must be a string, an object or an array")
 	}
-	questions, err := encodeQuestions(req.Questions, systemone, lim, &qc)
+	questions, err := encodeQuestions(req.Questions, lim, &qc)
 	if err != nil {
 		return nil, err
 	}
@@ -128,28 +127,17 @@ func encodeError(err error) error {
 }
 
 // encodeQuestions writes the questions as one JSON object, in order, and
-// checks each against the API's fixed rules into qc. For /v1/systemone a
-// truth question is written with that path's wire type, noul, and checked as
-// that path checks it. Only an encoding problem is returned here.
-func encodeQuestions(qs Questions, systemone bool, lim limits, qc *questionCheck) ([]byte, error) {
+// checks each against the API's fixed rules into qc. Only an encoding problem
+// is returned here.
+func encodeQuestions(qs Questions, lim limits, qc *questionCheck) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.WriteByte('{')
 	for i, q := range qs {
-		value := q.Question
-		if b, ok := value.(Question); ok && systemone && b.Type == "truth" {
-			b.Type = "noul"
-			value = b
-		}
-		raw, err := marshal(value)
+		raw, err := marshal(q.Question)
 		if err != nil {
 			return nil, encodeError(fmt.Errorf("question %q: %w", q.ID, err))
 		}
-		if systemone {
-			if ms, ok := objectMembers(raw); ok && string(bytes.TrimSpace(ms.get("type"))) == `"truth"` {
-				raw = replaceMember(raw, "type", []byte(`"noul"`))
-			}
-		}
-		qc.question(q.ID, raw, systemone, lim)
+		qc.question(q.ID, raw, lim)
 		key, err := marshal(q.ID)
 		if err != nil {
 			return nil, encodeError(err)
@@ -163,40 +151,6 @@ func encodeQuestions(qs Questions, systemone bool, lim limits, qc *questionCheck
 	}
 	buf.WriteByte('}')
 	return buf.Bytes(), nil
-}
-
-// replaceMember returns a JSON object with the value of one top-level member
-// replaced, every other byte kept as it was.
-func replaceMember(obj []byte, name string, value []byte) []byte {
-	dec := json.NewDecoder(bytes.NewReader(obj))
-	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
-		return obj
-	}
-	for dec.More() {
-		t, err := dec.Token()
-		if err != nil {
-			return obj
-		}
-		key, _ := t.(string)
-		start := int(dec.InputOffset())
-		var v json.RawMessage
-		if err := dec.Decode(&v); err != nil {
-			return obj
-		}
-		end := int(dec.InputOffset())
-		if key != name {
-			continue
-		}
-		// Skip the colon and any space between the key and the value.
-		for start < end && (obj[start] == ':' || obj[start] == ' ' || obj[start] == '\t' || obj[start] == '\n' || obj[start] == '\r') {
-			start++
-		}
-		out := make([]byte, 0, len(obj)-(end-start)+len(value))
-		out = append(out, obj[:start]...)
-		out = append(out, value...)
-		return append(out, obj[end:]...)
-	}
-	return obj
 }
 
 // inlineWire is a local image sent as base64: {"id", "media_type", "data"},

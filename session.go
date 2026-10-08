@@ -299,7 +299,7 @@ func (c *Client) sessionBody(r SessionRequest) ([]byte, error) {
 				map[string]any{"le": f.most}, fmt.Sprintf("%s must be from 1 to %d, got %d", f.name, f.most, *f.value))
 		}
 	}
-	questions, err := encodeQuestions(r.Questions, false, lim, &qc)
+	questions, err := encodeQuestions(r.Questions, lim, &qc)
 	if err != nil {
 		return nil, err
 	}

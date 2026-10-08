@@ -335,11 +335,6 @@ func TestPointAndBoxLocalChecks(t *testing.T) {
 	if !errors.As(err, &bad) || bad.Error() != "Box question must have instructions: pick" || bad.ErrorType != "" {
 		t.Fatalf("no instructions: %v", err)
 	}
-	// The strict path takes neither type.
-	err = c.CheckSystemone(dn.Request{Images: []dn.Image{belt}, Questions: dn.Questions{dn.Q("pick", dn.Point("Where?"))}})
-	if !errors.As(err, &bad) || bad.Error() != "Invalid request." || bad.ErrorType != "api_usage_error" {
-		t.Fatalf("systemone: %v", err)
-	}
 	// A session's images come with its frames: no image rule at open.
 	if err := c.CheckSession(dn.SessionRequest{Questions: dn.Questions{dn.Q("pick", dn.Point("Where?"))}}); err != nil {
 		t.Fatal(err)

@@ -554,7 +554,7 @@ func (c *Client) prepareBatch(reqs []BatchRequest, allowEmpty bool) ([]*prepared
 	}
 	preps := make([]*prepared, len(reqs))
 	for i := range reqs {
-		p, err := c.prepare(reqs[i].Request, false, reqs[i].CustomID)
+		p, err := c.prepare(reqs[i].Request, reqs[i].CustomID)
 		if err != nil {
 			var apiErr *Error
 			if errors.As(err, &apiErr) {

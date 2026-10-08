@@ -126,7 +126,7 @@ func TestQuestionChecks(t *testing.T) {
 		"no instructions":  {NumberWith("", 0, 10, nil), false},
 	}
 	for name, c := range bad {
-		_, err := checkQs(Questions{Q("q", c.q)}, false)
+		_, err := checkQs(Questions{Q("q", c.q)})
 		var v *ValidationError
 		var b *BadRequestError
 		switch {
@@ -142,36 +142,17 @@ func TestQuestionChecks(t *testing.T) {
 		"decimal grid":  NumberWith("?", json.Number("0.25"), 2, 0.5),
 		"truth by side": TruthWith(nil, "yes", nil),
 	} {
-		if _, err := checkQs(Questions{Q("q", q)}, false); err != nil {
+		if _, err := checkQs(Questions{Q("q", q)}); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
 	// The grid entry carries the API's shape.
-	_, err := checkQs(Questions{Q("cars", NumberWith("?", 0, 1000, 0.1))}, false)
+	_, err := checkQs(Questions{Q("cars", NumberWith("?", 0, 1000, 0.1))})
 	var v *ValidationError
 	errors.As(err, &v)
 	e := v.Entries[0].(map[string]any)
 	if e["type"] != "too_long" || v.Reason != "question 'cars': the grid holds 10001 values, the limit is 4096; narrow the range or widen the step" {
 		t.Fatalf("got %v, %q", e, v.Reason)
-	}
-}
-
-func TestSystemoneWritesTruthAsNoul(t *testing.T) {
-	got, err := checkQs(Questions{
-		Q("a", Truth("?")),
-		Q("b", json.RawMessage(`{"instructions":"?", "type" : "truth","criteria":{"true":"y"}}`)),
-		Q("c", Choice("?", []string{"x"})),
-	}, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := `{"a":{"type":"noul","instructions":"?"},"b":{"instructions":"?","type":"noul","criteria":{"true":"y"}},"c":{"type":"choice","instructions":"?","criteria":{"x":null}}}`
-	if string(got) != want {
-		t.Fatalf("got  %s\nwant %s", got, want)
-	}
-	spaced := replaceMember([]byte(`{"instructions":"?", "type" : "truth","n":{"type":"truth"}}`), "type", []byte(`"noul"`))
-	if string(spaced) != `{"instructions":"?", "type" : "noul","n":{"type":"truth"}}` {
-		t.Fatalf("got %s", spaced)
 	}
 }
 
@@ -240,9 +221,9 @@ func TestRetryPolicies(t *testing.T) {
 }
 
 // checkQs encodes and checks questions as a request would.
-func checkQs(qs Questions, systemone bool) ([]byte, error) {
+func checkQs(qs Questions) ([]byte, error) {
 	var qc questionCheck
-	b, err := encodeQuestions(qs, systemone, limits{}, &qc)
+	b, err := encodeQuestions(qs, limits{}, &qc)
 	if err != nil {
 		return nil, err
 	}

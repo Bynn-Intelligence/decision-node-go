@@ -6,7 +6,7 @@
 // for each, a score question places the state on an ordered scale, and a
 // number question gives a probability for each value of a grid.
 //
-// Decisions are made one at a time (Decide, Systemone), many at once
+// Decisions are made one at a time (Decide), many at once
 // (DecideMany), as a live stream of frames over a WebSocket (OpenSession,
 // Supervise), or asynchronously at half the price (Batches, RunBatch).
 // Images are best sent by URL (ImageURL); local images are checked before any

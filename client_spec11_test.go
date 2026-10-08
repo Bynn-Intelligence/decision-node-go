@@ -296,8 +296,8 @@ func TestChecksSendNothing(t *testing.T) {
 	if err := c.CheckDecide(dn.Request{Questions: oneTruth(), Images: []dn.Image{big}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.CheckSystemone(dn.Request{Questions: dn.Questions{dn.Q("n", dn.Number("How many?"))}}); err == nil {
-		t.Fatal("a number question passed the systemone check")
+	if err := c.CheckDecide(dn.Request{Questions: dn.Questions{dn.Q("n", dn.NumberWith("How many?", 60, 50, nil))}}); err == nil {
+		t.Fatal("a grid with min above max passed the check")
 	}
 	if err := c.CheckSession(dn.SessionRequest{Questions: oneTruth(), Window: dn.Ptr(65)}); err == nil {
 		t.Fatal("window 65 passed")

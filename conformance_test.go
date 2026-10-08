@@ -1042,13 +1042,10 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 		return nil, runCheck(root, c, method, args, r)
 	}
 	switch method {
-	case "decide", "systemone":
+	case "decide":
 		req, err := decodeRequest(root, args, r)
 		if err != nil {
 			return nil, err
-		}
-		if method == "systemone" {
-			return c.Systemone(ctx, req)
 		}
 		return c.Decide(ctx, req)
 	case "decide_many":
@@ -1204,13 +1201,10 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 
 func runCheck(root string, c *dn.Client, method string, args *object, r refs) error {
 	switch method {
-	case "decide", "systemone":
+	case "decide":
 		req, err := decodeRequest(root, args, r)
 		if err != nil {
 			return err
-		}
-		if method == "systemone" {
-			return c.CheckSystemone(req)
 		}
 		return c.CheckDecide(req)
 	case "open_session":

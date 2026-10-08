@@ -12,17 +12,7 @@ func (c *Client) CheckDecide(req Request) error {
 	if c.err != nil {
 		return c.err
 	}
-	_, err := c.prepare(req, false, nil)
-	return err
-}
-
-// CheckSystemone checks a request as Systemone would before sending it: the
-// strict path's question types, a truth written as that path writes it.
-func (c *Client) CheckSystemone(req Request) error {
-	if c.err != nil {
-		return c.err
-	}
-	_, err := c.prepare(req, true, nil)
+	_, err := c.prepare(req, nil)
 	return err
 }
 

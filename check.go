@@ -74,9 +74,8 @@ func (qc *questionCheck) err() error {
 }
 
 // question checks one question in its JSON form against the API's fixed
-// rules, in the server's order. systemone selects that path's question
-// types. It returns the question's type, "" when it has none that is read.
-func (qc *questionCheck) question(id string, raw []byte, systemone bool, lim limits) (typ string) {
+// rules, in the server's order. It returns the question's type, "" when it has none that is read.
+func (qc *questionCheck) question(id string, raw []byte, lim limits) (typ string) {
 	base := []any{"body", "questions", id}
 	q, ok := objectMembers(raw)
 	if !ok {
@@ -89,9 +88,9 @@ func (qc *questionCheck) question(id string, raw []byte, systemone bool, lim lim
 			fmt.Sprintf("question '%s': type: Field required", id))
 		return ""
 	}
-	if json.Unmarshal(q.get("type"), &typ) != nil || !knownType(typ, systemone) {
+	if json.Unmarshal(q.get("type"), &typ) != nil || !knownTypes[typ] {
 		qc.refuse(localBadRequest("api_usage_error", "Invalid request.",
-			fmt.Sprintf("question '%s': unknown type %s; the types are %s", id, compactJSON(q.get("type")), typeList(systemone))))
+			fmt.Sprintf("question '%s': unknown type %s; the types are %s", id, compactJSON(q.get("type")), "truth, choice, score, number, point and box")))
 		return ""
 	}
 	loc := []any{"body", "questions", id, typ}
@@ -140,7 +139,7 @@ func (qc *questionCheck) question(id string, raw []byte, systemone bool, lim lim
 			return typ
 		}
 		levels, ok := arrayElements(criteria)
-		if !ok && !systemone {
+		if !ok {
 			levels, ok = indexedLevels(criteria)
 		}
 		if !ok {
@@ -257,19 +256,9 @@ func (qc *questionCheck) sdl(loc []any, v json.RawMessage, reason string) {
 	}
 }
 
-func knownType(typ string, systemone bool) bool {
-	if systemone {
-		return typ == "noul" || typ == "choice" || typ == "score"
-	}
-	return typ == "truth" || typ == "noul" || typ == "choice" || typ == "score" || typ == "number" || typ == "point" || typ == "box"
-}
-
-func typeList(systemone bool) string {
-	if systemone {
-		return "noul, choice and score on /v1/systemone"
-	}
-	return "truth, noul, choice, score, number, point and box"
-}
+// knownTypes are the question types the API takes (the older name of truth
+// included, for a question sent in its wire form).
+var knownTypes = map[string]bool{"truth": true, "noul": true, "choice": true, "score": true, "number": true, "point": true, "box": true}
 
 // isSDL reports a JSON string, object or array.
 func isSDL(raw json.RawMessage) bool {

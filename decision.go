@@ -65,10 +65,8 @@ type answerBase struct {
 func (a answerBase) Type() string        { return a.typ }
 func (a answerBase) Raw() map[string]any { return a.raw }
 
-// TruthAnswer answers a truth question. An answer the server sent with the
-// wire type "noul" (every /v1/systemone truth answer, and the answer to a
-// question sent as "noul") is a TruthAnswer too, its value read from that
-// field; Type then returns "noul".
+// TruthAnswer answers a truth question. Type returns the answer's type as
+// the server sent it.
 type TruthAnswer struct {
 	answerBase
 	// Truth is the probability, 0 to 1, that the statement is true.

@@ -378,30 +378,21 @@ func sleep(ctx context.Context, d time.Duration) error {
 // status and no request id. Local images go inline under the inline
 // threshold and are uploaded at or above it.
 func (c *Client) Decide(ctx context.Context, req Request) (*Decision, error) {
-	d, _, err := c.decide(ctx, req, "/v1/decide", false)
+	d, _, err := c.decide(ctx, req)
 	return d, err
 }
 
-// Systemone sends one request to POST /v1/systemone, the strict path: a
-// model is always sent, and a truth question is written with that path's
-// wire type. Its answers read like those of Decide. The path takes truth,
-// choice and score questions; a number question is refused by the server.
-func (c *Client) Systemone(ctx context.Context, req Request) (*Decision, error) {
-	d, _, err := c.decide(ctx, req, "/v1/systemone", true)
-	return d, err
-}
-
-// decide sends one request and returns its decision and the response it was
-// read from.
-func (c *Client) decide(ctx context.Context, req Request, path string, systemone bool) (*Decision, *response, error) {
+// decide sends one request to POST /v1/decide and returns its decision and
+// the response it was read from.
+func (c *Client) decide(ctx context.Context, req Request) (*Decision, *response, error) {
 	if c.err != nil {
 		return nil, nil, c.err
 	}
-	p, err := c.prepare(req, systemone, nil)
+	p, err := c.prepare(req, nil)
 	if err != nil {
 		return nil, nil, err
 	}
-	return c.send(ctx, p, path)
+	return c.send(ctx, p, "/v1/decide")
 }
 
 // send places a prepared request's images, posts it and parses the
@@ -470,7 +461,7 @@ func (c *Client) DecideMany(ctx context.Context, reqs []Request, concurrency int
 	}
 	payloads := make([]*prepared, len(reqs))
 	for i, req := range reqs {
-		p, err := c.prepare(req, false, nil)
+		p, err := c.prepare(req, nil)
 		if err != nil {
 			var apiErr *Error
 			if errors.As(err, &apiErr) {
@@ -517,7 +508,7 @@ func (c *Client) Check(ctx context.Context, r CheckRequest) (*TruthAnswer, error
 		Images:    r.Images,
 		Videos:    r.Videos,
 		Model:     r.Model,
-	}, "/v1/decide", false)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -546,7 +537,7 @@ func (c *Client) Classify(ctx context.Context, r ClassifyRequest) (*ChoiceAnswer
 		Images:    r.Images,
 		Videos:    r.Videos,
 		Model:     r.Model,
-	}, "/v1/decide", false)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -575,7 +566,7 @@ func (c *Client) Score(ctx context.Context, r ScoreRequest) (*ScoreAnswer, error
 		Images:    r.Images,
 		Videos:    r.Videos,
 		Model:     r.Model,
-	}, "/v1/decide", false)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -605,7 +596,7 @@ func (c *Client) Number(ctx context.Context, r NumberRequest) (*NumberAnswer, er
 		Images:    r.Images,
 		Videos:    r.Videos,
 		Model:     r.Model,
-	}, "/v1/decide", false)
+	})
 	if err != nil {
 		return nil, err
 	}
