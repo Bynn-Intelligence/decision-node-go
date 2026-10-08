@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	dn "github.com/Bynn-Intelligence/decision-node-go"
 )
 
@@ -121,9 +123,9 @@ func TestSmallImagesGoInline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ids, err := c.Upload(context.Background(), []dn.Image{dn.ImageData("a", fixture(t, "3x2.jpg"), "")})
-	if err != nil || len(ids) != 1 {
-		t.Fatal(ids, err)
+	ups, err := c.Upload(context.Background(), []dn.Image{dn.ImageData("a", fixture(t, "3x2.jpg"), "")})
+	if err != nil || len(ups) != 1 || !strings.HasPrefix(ups[0].ID, "upl_") || time.Until(ups[0].ExpiresAt) < 50*time.Minute {
+		t.Fatal(ups, err)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -144,7 +146,7 @@ func TestBatchAddSplitsAt10MiB(t *testing.T) {
 	})
 	reqs := make([]dn.BatchRequest, 3)
 	for i := range reqs {
-		reqs[i] = dn.BatchRequest{CustomID: fmt.Sprint(i), Request: dn.Request{State: strings.Repeat("x", 3_800_000), Questions: oneTruth()}}
+		reqs[i] = dn.BatchRequest{CustomID: dn.Ptr(fmt.Sprint(i)), Request: dn.Request{State: strings.Repeat("x", 3_800_000), Questions: oneTruth()}}
 	}
 	b, err := client(t, srv.URL).Batches().Add(context.Background(), "batch_0123456789", reqs)
 	if err != nil || b.State != "draft" || b.Ended() {
@@ -158,12 +160,12 @@ func TestBatchAddSplitsAt10MiB(t *testing.T) {
 func TestRunBatchPollIntervalAndLocalChecks(t *testing.T) {
 	srv, rec := server(t, func(w http.ResponseWriter, r *http.Request, n int) { respond(w, 200, `{}`, nil) })
 	c := client(t, srv.URL)
-	reqs := []dn.BatchRequest{{CustomID: "a", Request: dn.Request{Questions: oneTruth()}}}
+	reqs := []dn.BatchRequest{{CustomID: dn.Ptr("a"), Request: dn.Request{Questions: oneTruth()}}}
 	var apiErr *dn.Error
 	if _, _, err := c.RunBatch(context.Background(), reqs, dn.RunBatchOptions{PollInterval: 5 * time.Second}); err == nil || errors.As(err, &apiErr) {
 		t.Fatalf("poll interval: %v", err)
 	}
-	bad := []dn.BatchRequest{{CustomID: "a", Request: dn.Request{Questions: dn.Questions{dn.Q("q", dn.Score("?", []string{}))}}}}
+	bad := []dn.BatchRequest{{CustomID: dn.Ptr("a"), Request: dn.Request{Questions: dn.Questions{dn.Q("q", dn.Score("?", []string{}))}}}}
 	var v *dn.ValidationError
 	if _, _, err := c.RunBatch(context.Background(), bad, dn.RunBatchOptions{}); !errors.As(err, &v) {
 		t.Fatalf("local check: %v", err)
@@ -182,5 +184,107 @@ func TestSessionLimitIsNotRetried(t *testing.T) {
 	var rate *dn.RateLimitError
 	if !errors.As(err, &limit) || !errors.As(err, &rate) || rate.RetryAfter != 3*time.Second || rec.count() != 1 {
 		t.Fatalf("got %v after %d attempts", err, rec.count())
+	}
+}
+
+func TestEndSessionByID(t *testing.T) {
+	srv, rec := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/sessions/ses_abc" {
+			t.Errorf("%s %s", r.Method, r.URL.Path)
+		}
+		if n == 1 {
+			respond(w, 200, `{"session_id":"ses_abc","status":"ended","frames_answered":3,"last_seq":3,"tokens_billed":120}`, nil)
+			return
+		}
+		if n == 2 {
+			respond(w, 404, `{"detail":{"error_type":"not_found_error","message":"No open session with this id for this key."}}`, nil)
+			return
+		}
+		respond(w, 500, `{"detail":{"error_type":"api_error","message":"x"}}`, nil)
+	})
+	c := client(t, srv.URL)
+	sum, err := c.EndSession(context.Background(), "ses_abc")
+	if err != nil || sum.FramesAnswered != 3 || *sum.LastSeq != 3 || sum.Status != "ended" {
+		t.Fatal(sum, err)
+	}
+	if sum, err := c.EndSession(context.Background(), "ses_abc"); sum != nil || err != nil {
+		t.Fatal("a 404 is success with no summary", sum, err)
+	}
+	var se *dn.ServerError
+	if _, err := c.EndSession(context.Background(), "ses_abc"); !errors.As(err, &se) || rec.count() != 3 {
+		t.Fatalf("a 500 is not retried: %v after %d requests", err, rec.count())
+	}
+}
+
+func TestSessionFramesAndRawJSON(t *testing.T) {
+	reply := `{"seq":1,"answers":{"abort":{"type":"truth","truth":0.8200000000000001}},"usage":{"input_tokens":3,"output_tokens":0},"latency_ms":1.0}`
+	var got []string
+	var mu sync.Mutex
+	up := websocket.Upgrader{}
+	var srvURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/sessions" {
+			respond(w, 200, `{"session_id":"ses_000000000000000000000001","model":"decisionnode-1.0","stream_url":"`+
+				strings.Replace(srvURL, "http", "ws", 1)+`/stream","questions":["abort"],"answers":{}}`, nil)
+			return
+		}
+		conn, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		mu.Lock()
+		got = append(got, string(msg))
+		mu.Unlock()
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(reply))
+		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4410, "expired"))
+		_, _, _ = conn.ReadMessage()
+	}))
+	defer srv.Close()
+	srvURL = srv.URL
+	ctx := context.Background()
+	s, err := client(t, srv.URL).OpenSession(ctx, dn.SessionRequest{Questions: dn.Questions{dn.Q("abort", dn.Truth("Abort?"))}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var bad *dn.BadRequestError
+	for name, f := range map[string]dn.Frame{
+		"no frame":         {},
+		"empty frame":      {Frame: ""},
+		"unknown question": {Frame: "a", Questions: []string{"speed"}},
+		"empty questions":  {Frame: "a", Questions: []string{}},
+		"negative seq":     {Frame: "a", Seq: dn.Ptr(int64(-1))},
+		"url image":        {Image: dn.Ptr(dn.ImageURL("f", "https://example.com/f.jpg"))},
+		"number frame":     {Frame: 5},
+	} {
+		if _, err := s.Send(ctx, f); !errors.As(err, &bad) || bad.ErrorType != "api_usage_error" {
+			t.Errorf("%s: got %v", name, err)
+		}
+	}
+	seq, err := s.Send(ctx, dn.Frame{Frame: "a"})
+	if err != nil || seq != 1 {
+		t.Fatalf("the first frame sent after refusals: seq %d, %v", seq, err)
+	}
+	ev, _ := s.Next(ctx)
+	r, ok := ev.(*dn.Reply)
+	if !ok || string(r.RawJSON) != reply {
+		t.Fatalf("reply %#v", ev)
+	}
+	ev, _ = s.Next(ctx)
+	closed, ok := ev.(*dn.SessionClosed)
+	if !ok || closed.Code != 4410 || !closed.Reopen || string(closed.RawJSON) != `{"code":4410,"reason":"expired","reopen":true}` {
+		t.Fatalf("closed %#v %s", ev, closed.RawJSON)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 || got[0] != `{"seq":1,"frame":"a"}` {
+		t.Fatalf("frames on the socket: %q", got)
 	}
 }

@@ -241,6 +241,11 @@ func choiceCriteria(options any) any {
 	return options
 }
 
+// Ptr returns a pointer to v, for the optional fields that tell a value of 0
+// or "" from one not given: SessionRequest.Window, Frame.Seq,
+// BatchRequest.CustomID, BatchListOptions.Limit.
+func Ptr[T any](v T) *T { return &v }
+
 // marshal encodes v as compact JSON without escaping <, > and &.
 func marshal(v any) ([]byte, error) {
 	var buf bytes.Buffer

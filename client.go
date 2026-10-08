@@ -49,6 +49,13 @@ type Client struct {
 	inlineThreshold int
 	// uploads caches uploads by content hash, in memory, for this client only.
 	uploads *uploadCache
+	// now is the time uploads, upload URLs and cache entries are judged by.
+	// Tests replace it.
+	now func() time.Time
+	// held holds the entries of the last GET /v1/models, by model name, for
+	// the local checks of the limits only that list states.
+	heldMu sync.RWMutex
+	held   map[string]ModelInfo
 	// sleep waits between attempts, between PUT retries, between RunBatch
 	// polls and before Supervise reopens. Tests replace it to record the
 	// waits.
@@ -188,6 +195,7 @@ func NewClient(opts ...Option) *Client {
 		headers:         http.Header{},
 		inlineThreshold: DefaultInlineThreshold,
 		uploads:         newUploadCache(),
+		now:             time.Now,
 		sleep:           sleep,
 	}
 	for _, opt := range opts {
@@ -620,7 +628,24 @@ func GateQuestions() Questions {
 	}
 }
 
+// limitsFor returns what the client holds from /v1/models for a model.
+func (c *Client) limitsFor(model string) limits {
+	if model == "" {
+		model = c.model
+	}
+	c.heldMu.RLock()
+	m, ok := c.held[model]
+	c.heldMu.RUnlock()
+	if !ok {
+		return limits{model: model}
+	}
+	return limitsOf(model, m)
+}
+
 // Models lists the models the key may use, with their published limits.
+// The client keeps the list: a limit only it states (a model that serves no
+// sessions or answers no number questions, a lower max_window, the batch
+// limits) is then checked locally before later calls.
 func (c *Client) Models(ctx context.Context) ([]ModelInfo, error) {
 	resp, err := c.do(ctx, http.MethodGet, "/v1/models", nil)
 	if err != nil {
@@ -630,6 +655,13 @@ func (c *Client) Models(ctx context.Context) ([]ModelInfo, error) {
 	if err != nil {
 		return nil, invalidResponse(resp, err)
 	}
+	held := make(map[string]ModelInfo, len(models))
+	for _, m := range models {
+		held[m.Name] = m
+	}
+	c.heldMu.Lock()
+	c.held = held
+	c.heldMu.Unlock()
 	return models, nil
 }
 
@@ -712,6 +744,8 @@ const (
 	// nothing: batch create, add and finalize, where a repeat after a lost
 	// answer could create a second draft or refuse repeated custom ids.
 	retryMutation
+	// retryNever sends once.
+	retryNever
 )
 
 // callOptions are the per-call settings of call.
@@ -740,7 +774,7 @@ func (c *Client) call(ctx context.Context, method, path string, payload []byte, 
 		if err == nil {
 			return resp, nil
 		}
-		if ctx.Err() != nil || attempt >= c.maxRetries || !retryable(err, o.policy) {
+		if ctx.Err() != nil || attempt >= c.maxRetries || o.policy == retryNever || !retryable(err, o.policy) {
 			return nil, err
 		}
 		wait := backoff(attempt)

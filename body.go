@@ -47,6 +47,7 @@ func (p *prepared) body(wires [][]byte) []byte {
 // for its content is the API's own error class. customID, when not nil,
 // makes the body a batch line.
 func (c *Client) prepare(req Request, systemone bool, customID *string) (*prepared, error) {
+	// A batch line's custom_id is checked by checkLines before this.
 	if len(req.Questions) == 0 {
 		return nil, errors.New("decisionnode: questions must hold at least one question")
 	}
@@ -58,11 +59,32 @@ func (c *Client) prepare(req Request, systemone bool, customID *string) (*prepar
 	if state == nil {
 		state = ""
 	}
-	questions, err := encodeQuestions(req.Questions, systemone)
+	lim := c.limitsFor(model)
+	var qc questionCheck
+	stateJSON, err := marshal(state)
+	if err != nil {
+		return nil, encodeError(err)
+	}
+	if !isSDL(stateJSON) && !isNull(stateJSON) {
+		qc.sdl([]any{"body", "state"}, stateJSON, "state must be a string, an object or an array")
+	}
+	questions, err := encodeQuestions(req.Questions, systemone, lim, &qc)
 	if err != nil {
 		return nil, err
 	}
-	if err := checkImages(req.Images); err != nil {
+	// The server's order: the nesting limit, the 422 entries, the first 400,
+	// then the images.
+	depth := max(jsonDepth(stateJSON)+1, jsonDepth(questions)+1)
+	if len(req.Images) > 0 {
+		depth = max(depth, 3)
+	}
+	if err := checkNesting(depth); err != nil {
+		return nil, err
+	}
+	if err := qc.err(); err != nil {
+		return nil, err
+	}
+	if err := checkImages(req.Images, lim); err != nil {
 		return nil, err
 	}
 	var head bytes.Buffer
@@ -76,10 +98,8 @@ func (c *Client) prepare(req Request, systemone bool, customID *string) (*prepar
 	if err := writeMember(&head, "model", model); err != nil {
 		return nil, encodeError(err)
 	}
-	head.WriteByte(',')
-	if err := writeMember(&head, "state", state); err != nil {
-		return nil, encodeError(err)
-	}
+	head.WriteString(`,"state":`)
+	head.Write(stateJSON)
 	head.WriteString(`,"questions":`)
 	head.Write(questions)
 	return &prepared{head: head.Bytes(), images: req.Images}, nil
@@ -90,11 +110,11 @@ func encodeError(err error) error {
 }
 
 // encodeQuestions writes the questions as one JSON object, in order, and
-// checks each against the API's fixed rules. For /v1/systemone a truth
-// question is written with that path's wire type, noul.
-func encodeQuestions(qs Questions, systemone bool) ([]byte, error) {
+// checks each against the API's fixed rules into qc. For /v1/systemone a
+// truth question is written with that path's wire type, noul, and checked as
+// that path checks it. Only an encoding problem is returned here.
+func encodeQuestions(qs Questions, systemone bool, lim limits, qc *questionCheck) ([]byte, error) {
 	var buf bytes.Buffer
-	var qc questionCheck
 	buf.WriteByte('{')
 	for i, q := range qs {
 		value := q.Question
@@ -106,10 +126,12 @@ func encodeQuestions(qs Questions, systemone bool) ([]byte, error) {
 		if err != nil {
 			return nil, encodeError(fmt.Errorf("question %q: %w", q.ID, err))
 		}
-		typ := qc.question(q.ID, raw)
-		if systemone && typ == "truth" {
-			raw = replaceMember(raw, "type", []byte(`"noul"`))
+		if systemone {
+			if ms, ok := objectMembers(raw); ok && string(bytes.TrimSpace(ms.get("type"))) == `"truth"` {
+				raw = replaceMember(raw, "type", []byte(`"noul"`))
+			}
 		}
+		qc.question(q.ID, raw, systemone, lim)
 		key, err := marshal(q.ID)
 		if err != nil {
 			return nil, encodeError(err)
@@ -122,9 +144,6 @@ func encodeQuestions(qs Questions, systemone bool) ([]byte, error) {
 		buf.Write(raw)
 	}
 	buf.WriteByte('}')
-	if err := qc.err(); err != nil {
-		return nil, err
-	}
 	return buf.Bytes(), nil
 }
 

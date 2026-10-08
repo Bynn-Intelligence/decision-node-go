@@ -137,6 +137,20 @@ func (m *mock) query(t *testing.T, query string) mockLog {
 	return out
 }
 
+func (m *mock) clockNow(t *testing.T, sid string) time.Time {
+	resp, err := http.Get(m.url + "/_mock/clock?session=" + url.QueryEscape(sid))
+	if err != nil {
+		t.Error(err)
+		return time.Now()
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var out struct {
+		Epoch float64 `json:"epoch_seconds"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return time.Unix(0, int64(out.Epoch*float64(time.Second)))
+}
+
 func (m *mock) post(t *testing.T, path string, body any) {
 	resp, err := http.Post(m.url+path, "application/json", bytes.NewReader(raw(body)))
 	if err != nil {
@@ -617,8 +631,24 @@ func special(v any, r refs) (any, bool) {
 		n, _ := get(args, "times")
 		times, _ := n.(json.Number).Int64()
 		return strings.Repeat(str(args.vals["repeat"]), int(times)), true
+	case "$nest":
+		// The value inside depth arrays: [[[...value...]]].
+		n, _ := get(args, "depth")
+		depth, _ := n.(json.Number).Int64()
+		out := json.RawMessage(raw(plainOrRaw(args.vals["value"], r)))
+		for i := 0; i < int(depth); i++ {
+			out = append(append(json.RawMessage("["), out...), ']')
+		}
+		return out, true
 	}
 	return nil, false
+}
+
+func plainOrRaw(v any, r refs) any {
+	if x, ok := special(v, r); ok {
+		return x
+	}
+	return raw(v)
 }
 
 func decodeQuestion(v any) any {
@@ -778,7 +808,11 @@ func decodeBatchRequests(root string, v any, r refs) ([]dn.BatchRequest, error) 
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, dn.BatchRequest{CustomID: str(o.vals["custom_id"]), Request: req})
+		br := dn.BatchRequest{Request: req}
+		if v, ok := get(o, "custom_id"); ok && v != nil {
+			br.CustomID = dn.Ptr(str(v))
+		}
+		out = append(out, br)
 	}
 	return out, nil
 }
@@ -793,11 +827,11 @@ func decodeSessionRequest(args *object, r refs) dn.SessionRequest {
 	}
 	if n, ok := args.vals["window"].(json.Number); ok {
 		i, _ := n.Int64()
-		sr.Window = int(i)
+		sr.Window = dn.Ptr(int(i))
 	}
 	if n, ok := args.vals["ttl_seconds"].(json.Number); ok {
 		i, _ := n.Int64()
-		sr.TTLSeconds = int(i)
+		sr.TTLSeconds = dn.Ptr(int(i))
 	}
 	return sr
 }
@@ -815,6 +849,7 @@ func decodeFrame(root string, args *object, r refs) (dn.Frame, error) {
 		f.Image = &img
 	}
 	if v, ok := get(args, "questions"); ok && v != nil {
+		f.Questions = []string{}
 		for _, q := range v.([]any) {
 			f.Questions = append(f.Questions, str(q))
 		}
@@ -934,7 +969,15 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 	case "decide_raw":
 		return c.DecideRaw(ctx, raw(args.vals["body"]))
 	case "upload":
-		return c.Upload(ctx, images)
+		ups, err := c.Upload(ctx, images)
+		if err != nil {
+			return nil, err
+		}
+		ids := make([]string, len(ups))
+		for i, u := range ups {
+			ids[i] = u.ID
+		}
+		return ids, nil
 	case "open_session":
 		return c.OpenSession(ctx, decodeSessionRequest(args, r))
 	case "supervise":
@@ -999,11 +1042,11 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 		var opts dn.BatchListOptions
 		if n, ok := args.vals["offset"].(json.Number); ok {
 			i, _ := n.Int64()
-			opts.Offset = int(i)
+			opts.Offset = dn.Ptr(int(i))
 		}
 		if n, ok := args.vals["limit"].(json.Number); ok {
 			i, _ := n.Int64()
-			opts.Limit = int(i)
+			opts.Limit = dn.Ptr(int(i))
 		}
 		return c.Batches().List(ctx, opts)
 	}
@@ -1789,7 +1832,17 @@ func runSteps(t *testing.T, root string, m *mock, sid string, client *dn.Client,
 			if err != nil {
 				return events, err
 			}
-			if _, err := s.Send(ctx, f); err != nil {
+			_, err = s.Send(ctx, f)
+			if o, ok := get(step, "outcome"); ok {
+				// A frame that breaks a fixed rule is refused locally and
+				// nothing is sent.
+				if err == nil {
+					return events, fmt.Errorf("%s: expected %v, the frame was sent", where, plain(o))
+				}
+				if e := checkOutcome(plain(o).(map[string]any), nil, err, where+".outcome"); e != nil {
+					return events, e
+				}
+			} else if err != nil {
 				return events, fmt.Errorf("%s: send: %w", where, err)
 			}
 		case step.vals["read"] != nil:
@@ -1923,6 +1976,11 @@ func runBehaviour(t *testing.T, root string, m *mock, c *object) error {
 			mu.Unlock()
 			return ctx.Err()
 		}))
+	}
+	if spec, _ := c.vals["client"].(*object); spec != nil && str(spec.vals["clock"]) == "mock" {
+		// The SDK's clock reads the mock's clock for this session, so a case
+		// that moves the mock's time moves the SDK's with it.
+		more = append(more, dn.WithClock(func() time.Time { return m.clockNow(t, sid) }))
 	}
 	client := makeClient(t, c, m.url, extra, more...)
 	start := time.Now()

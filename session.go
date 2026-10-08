@@ -37,11 +37,12 @@ type SessionRequest struct {
 	// Model overrides the client's model. A model is always sent.
 	Model string
 	// Window is the number of recent frames each frame is answered with,
-	// itself included (1 to 64). 0 leaves it to the server (8).
-	Window int
+	// itself included (1 to 64). Nil leaves it to the server (8). Set it with
+	// Ptr(16).
+	Window *int
 	// TTLSeconds is the session's lifetime from the open call (1 to 3,600).
-	// 0 leaves it to the server (300).
-	TTLSeconds int
+	// Nil leaves it to the server (300).
+	TTLSeconds *int
 }
 
 // SessionLimits are a session's own limits, from its open response.
@@ -129,8 +130,10 @@ type Reply struct {
 	LatencyMs *float64
 	// Safety is the safety check of this frame, from the body.
 	Safety *Safety
-	// Raw is the message as sent.
+	// Raw is the message as parsed.
 	Raw map[string]any
+	// RawJSON is the message exactly as the server sent it.
+	RawJSON json.RawMessage
 }
 
 // FrameError is a frame the server could not answer. It is a value, never
@@ -154,8 +157,10 @@ type FrameError struct {
 	// Safety is the safety check of a refused frame, with Blocked set. Nil
 	// otherwise.
 	Safety *Safety
-	// Raw is the message as sent.
+	// Raw is the message as parsed.
 	Raw map[string]any
+	// RawJSON is the message exactly as the server sent it.
+	RawJSON json.RawMessage
 }
 
 // SessionClosed ends a session's events: the socket closed with Code.
@@ -170,6 +175,16 @@ type SessionClosed struct {
 	// It is false for 1013, after which the client connects again to the
 	// same session, and for every code that should stop the client.
 	Reopen bool
+	// RawJSON is the close as one JSON object, {"code", "reason", "reopen"},
+	// so every event prints the same way. A close frame itself carries no
+	// JSON.
+	RawJSON json.RawMessage
+}
+
+func newSessionClosed(code int, reason string) *SessionClosed {
+	e := &SessionClosed{Code: code, Reason: reason, Reopen: reopenCodes[code]}
+	e.RawJSON, _ = marshal(map[string]any{"code": code, "reason": reason, "reopen": e.Reopen})
+	return e
 }
 
 func (*Reply) sessionEvent()         {}
@@ -210,40 +225,79 @@ func (c *Client) OpenSession(ctx context.Context, r SessionRequest) (*Session, e
 	if len(r.Questions) == 0 {
 		return nil, errors.New("decisionnode: questions must hold at least one question")
 	}
-	if r.Window < 0 || r.TTLSeconds < 0 {
-		return nil, errors.New("decisionnode: window and ttl seconds must be 0 (not given) or more")
-	}
-	questions, err := encodeQuestions(r.Questions, false)
-	if err != nil {
-		return nil, err
-	}
 	model := c.model
 	if r.Model != "" {
 		model = r.Model
 	}
+	lim := c.limitsFor(model)
+	var qc questionCheck
 	var buf bytes.Buffer
 	buf.WriteByte('{')
 	if err := writeMember(&buf, "model", model); err != nil {
 		return nil, encodeError(err)
 	}
+	depth := 1
 	for _, f := range []struct {
 		name  string
 		value any
 	}{{"instructions", r.Instructions}, {"state", r.State}} {
-		if f.value != nil {
-			buf.WriteByte(',')
-			if err := writeMember(&buf, f.name, f.value); err != nil {
-				return nil, encodeError(err)
-			}
+		if f.value == nil {
+			continue
 		}
+		v, err := marshal(f.value)
+		if err != nil {
+			return nil, encodeError(err)
+		}
+		if !isSDL(v) && !isNull(v) {
+			qc.sdl([]any{"body", f.name}, v, f.name+" must be a string, an object or an array")
+		}
+		depth = max(depth, jsonDepth(v)+1)
+		buf.WriteString(`,"` + f.name + `":`)
+		buf.Write(v)
+	}
+	maxWindow, maxTTL := 64, 3600
+	if lim.maxWindow > 0 {
+		maxWindow = lim.maxWindow
+	}
+	if lim.maxTTLSeconds > 0 {
+		maxTTL = lim.maxTTLSeconds
+	}
+	for _, f := range []struct {
+		name  string
+		value *int
+		most  int
+	}{{"window", r.Window, maxWindow}, {"ttl_seconds", r.TTLSeconds, maxTTL}} {
+		switch {
+		case f.value == nil:
+		case *f.value < 1:
+			qc.entry("greater_than_equal", []any{"body", f.name}, "Input should be greater than or equal to 1", *f.value,
+				map[string]any{"ge": 1}, fmt.Sprintf("%s must be from 1 to %d, got %d", f.name, f.most, *f.value))
+		case *f.value > f.most:
+			qc.entry("less_than_equal", []any{"body", f.name}, fmt.Sprintf("Input should be less than or equal to %d", f.most), *f.value,
+				map[string]any{"le": f.most}, fmt.Sprintf("%s must be from 1 to %d, got %d", f.name, f.most, *f.value))
+		}
+	}
+	questions, err := encodeQuestions(r.Questions, false, lim, &qc)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkNesting(max(depth, jsonDepth(questions)+1)); err != nil {
+		return nil, err
+	}
+	if err := qc.err(); err != nil {
+		return nil, err
+	}
+	if lim.sessionsHeld && !lim.sessionsEnabled {
+		msg := fmt.Sprintf("Model %s does not serve sessions.", model)
+		return nil, localBadRequest("api_usage_error", msg, msg)
 	}
 	buf.WriteString(`,"questions":`)
 	buf.Write(questions)
-	if r.Window > 0 {
-		fmt.Fprintf(&buf, `,"window":%d`, r.Window)
+	if r.Window != nil {
+		fmt.Fprintf(&buf, `,"window":%d`, *r.Window)
 	}
-	if r.TTLSeconds > 0 {
-		fmt.Fprintf(&buf, `,"ttl_seconds":%d`, r.TTLSeconds)
+	if r.TTLSeconds != nil {
+		fmt.Fprintf(&buf, `,"ttl_seconds":%d`, *r.TTLSeconds)
 	}
 	buf.WriteByte('}')
 	resp, err := c.doPayload(ctx, http.MethodPost, "/v1/sessions", buf.Bytes())
@@ -371,18 +425,17 @@ func (s *Session) read(conn *websocket.Conn, q *eventQueue) {
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			closed := &SessionClosed{Code: websocket.CloseAbnormalClosure}
+			code, reason := websocket.CloseAbnormalClosure, ""
 			var ce *websocket.CloseError
 			if errors.As(err, &ce) {
-				closed.Code, closed.Reason = ce.Code, ce.Text
+				code, reason = ce.Code, ce.Text
 			}
 			s.mu.Lock()
-			if s.closing && closed.Code == websocket.CloseAbnormalClosure {
-				closed.Code = websocket.CloseNormalClosure
+			if s.closing && code == websocket.CloseAbnormalClosure {
+				code = websocket.CloseNormalClosure
 			}
 			s.mu.Unlock()
-			closed.Reopen = reopenCodes[closed.Code]
-			q.close(closed)
+			q.close(newSessionClosed(code, reason))
 			return
 		}
 		if ev := parseEvent(msg); ev != nil {
@@ -413,6 +466,7 @@ func parseEvent(msg []byte) SessionEvent {
 		return &FrameError{
 			Seq: shape.Seq, ErrorType: shape.Error.ErrorType, Message: shape.Error.Message, Category: shape.Error.Category,
 			RetryAfterMs: shape.RetryAfterMs, Usage: shape.Usage, Safety: parseSafetyBody(raw["safety"]), Raw: raw,
+			RawJSON: json.RawMessage(bytes.Clone(msg)),
 		}
 	}
 	var shape struct {
@@ -426,39 +480,34 @@ func parseEvent(msg []byte) SessionEvent {
 	return &Reply{
 		Seq: shape.Seq, Answers: parseAnswers(shape.Answers), Dropped: shape.Dropped, Usage: shape.Usage,
 		LatencyMs: shape.LatencyMs, Safety: parseSafetyBody(raw["safety"]), Raw: raw,
+		RawJSON: json.RawMessage(bytes.Clone(msg)),
 	}
 }
 
 // Send sends one frame and returns its seq. It never waits for the reply:
-// read it with Next or Replies. The frame's image is checked locally and
-// sent inline or uploaded first, as the inline threshold says; a fault in it
-// is the API's own error class and nothing is sent.
+// read it with Next or Replies.
+//
+// The frame is checked first against the rules the server checks a frame by:
+// seq from 0 to 2^53-1, a frame value or an image, a frame that is a
+// non-empty string, an object or an array nested at most 128 deep, questions
+// that are a non-empty list of the session's ids, and an image by bytes or
+// upload (never a URL) within the image rules. A fault returns a
+// *BadRequestError with error_type api_usage_error, the message the server's
+// frame error would carry, and nothing is written: the refused frame takes no
+// seq. The frame's image is sent inline or uploaded first, as the inline
+// threshold says.
 func (s *Session) Send(ctx context.Context, f Frame) (int64, error) {
+	frame, questions, err := s.checkFrame(f)
+	if err != nil {
+		return 0, err
+	}
 	var image []byte
 	if f.Image != nil {
-		if err := checkImage(*f.Image); err != nil {
-			return 0, err
-		}
-		if f.Image.url != "" {
-			return 0, usageError("A frame's image takes bytes or an upload, not a url.")
-		}
 		pl, err := s.client.placeImages(ctx, []Image{*f.Image}, false)
 		if err != nil {
 			return 0, err
 		}
 		image = pl.wires[0]
-	}
-	var frame, questions []byte
-	var err error
-	if f.Frame != nil {
-		if frame, err = marshal(f.Frame); err != nil {
-			return 0, encodeError(err)
-		}
-	}
-	if f.Questions != nil {
-		if questions, err = marshal(f.Questions); err != nil {
-			return 0, encodeError(err)
-		}
 	}
 
 	s.mu.Lock()
@@ -498,6 +547,63 @@ func (s *Session) Send(ctx context.Context, f Frame) (int64, error) {
 	return seq, nil
 }
 
+const maxSeq = 1<<53 - 1
+
+// checkFrame applies a frame's fixed rules and encodes its frame value and
+// question list.
+func (s *Session) checkFrame(f Frame) (frame, questions []byte, err error) {
+	if f.Seq != nil && (*f.Seq < 0 || *f.Seq > maxSeq) {
+		return nil, nil, usageError(fmt.Sprintf("seq: must be an integer from 0 to %d.", int64(maxSeq)))
+	}
+	if f.Frame == nil && f.Image == nil {
+		return nil, nil, usageError("frame: a frame needs a frame value or an image.")
+	}
+	if f.Frame != nil {
+		if frame, err = marshal(f.Frame); err != nil {
+			return nil, nil, encodeError(err)
+		}
+		if !isSDL(frame) || string(frame) == `""` {
+			return nil, nil, usageError("frame: must be a string, an object or an array, not empty.")
+		}
+	}
+	if f.Questions != nil {
+		if len(f.Questions) == 0 {
+			return nil, nil, usageError("questions: must be a non-empty list of the session's question ids.")
+		}
+		if s.Questions != nil {
+			for _, id := range f.Questions {
+				if !containsString(s.Questions, id) {
+					return nil, nil, usageError(fmt.Sprintf("questions: unknown question id '%s'", id))
+				}
+			}
+		}
+		if questions, err = marshal(f.Questions); err != nil {
+			return nil, nil, encodeError(err)
+		}
+	}
+	if frame != nil && jsonDepth(frame)+1 > maxNesting {
+		return nil, nil, usageError(fmt.Sprintf("The frame nests more than %d objects and arrays inside each other.", maxNesting))
+	}
+	if f.Image != nil {
+		if f.Image.url != "" {
+			return nil, nil, usageError("image: a frame takes bytes or an upload, not a url.")
+		}
+		if err := checkImage(*f.Image, s.client.limitsFor(s.Model)); err != nil {
+			return nil, nil, err
+		}
+	}
+	return frame, questions, nil
+}
+
+func containsString(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
 // Next returns the session's next event: a *Reply, a *FrameError or, last,
 // a *SessionClosed, which every later call returns again. It waits until an
 // event arrives or ctx is done.
@@ -531,11 +637,28 @@ func (s *Session) Replies() <-chan SessionEvent {
 // attached socket with 1000. A session that has already ended (404) is
 // success, with a nil summary.
 func (s *Session) End(ctx context.Context) (*SessionSummary, error) {
-	c := s.client
-	if c == nil {
+	if s.client == nil {
 		return nil, errors.New("decisionnode: the session was not opened by a client")
 	}
-	resp, err := c.doPayload(ctx, http.MethodDelete, "/v1/sessions/"+url.PathEscape(s.ID), nil)
+	return s.client.endSession(ctx, s.ID, retryDefault)
+}
+
+// EndSession ends a session by its id with DELETE /v1/sessions/{id}, for a
+// session this client did not open (another process's, or one whose id was
+// kept). It is sent once, never retried. A session that has already ended
+// (404) is success, with a nil summary.
+func (c *Client) EndSession(ctx context.Context, sessionID string) (*SessionSummary, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	if sessionID == "" {
+		return nil, errors.New("decisionnode: the session id is empty")
+	}
+	return c.endSession(ctx, sessionID, retryNever)
+}
+
+func (c *Client) endSession(ctx context.Context, sessionID string, policy retryPolicy) (*SessionSummary, error) {
+	resp, err := c.call(ctx, http.MethodDelete, "/v1/sessions/"+url.PathEscape(sessionID), nil, callOptions{policy: policy})
 	if err != nil {
 		var nf *NotFoundError
 		if errors.As(err, &nf) {
@@ -791,7 +914,7 @@ func (sv *supervisor) sendFrame(ctx context.Context, f Frame) (stop bool, err er
 				var ce *ConnectionError
 				var te *TimeoutError
 				if errors.As(err, &ce) || errors.As(err, &te) {
-					sv.last = &SessionClosed{Code: websocket.CloseAbnormalClosure, Reopen: true}
+					sv.last = newSessionClosed(websocket.CloseAbnormalClosure, err.Error())
 					continue
 				}
 				return false, err
@@ -812,7 +935,7 @@ func (sv *supervisor) sendFrame(ctx context.Context, f Frame) (stop bool, err er
 		sv.drain(ctx, sv.c.timeout)
 		if sv.connected {
 			sv.connected = false
-			sv.last = &SessionClosed{Code: websocket.CloseAbnormalClosure, Reopen: true}
+			sv.last = newSessionClosed(websocket.CloseAbnormalClosure, "the frame could not be sent")
 		}
 	}
 }

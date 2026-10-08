@@ -66,18 +66,22 @@ func TestCheckImage(t *testing.T) {
 		"bad type":   ImageUpload("u", "upl_x", "image/gif"),
 	} {
 		var bad *BadRequestError
-		if err := checkImage(img); !errors.As(err, &bad) || bad.Status != 0 || bad.ErrorType != "api_usage_error" {
+		want := "api_usage_error"
+		if name == "long url" {
+			want = "image_url_refused"
+		}
+		if err := checkImage(img, limits{}); !errors.As(err, &bad) || bad.Status != 0 || bad.ErrorType != want {
 			t.Errorf("%s: got %v", name, err)
 		}
 	}
-	if err := checkImage(ImageData("ok", png, "image/png")); err != nil {
+	if err := checkImage(ImageData("ok", png, "image/png"), limits{}); err != nil {
 		t.Fatal(err)
 	}
 	five := []Image{ImageURL("a", "https://x/a"), ImageURL("b", "https://x/b"), ImageURL("c", "https://x/c"), ImageURL("d", "https://x/d"), ImageURL("e", "https://x/e")}
-	if err := checkImages(five); err == nil {
+	if err := checkImages(five, limits{}); err == nil {
 		t.Fatal("five images accepted")
 	}
-	if err := checkImages([]Image{ImageURL("a", "https://x/a"), ImageURL("a", "https://x/b")}); err == nil {
+	if err := checkImages([]Image{ImageURL("a", "https://x/a"), ImageURL("a", "https://x/b")}, limits{}); err == nil {
 		t.Fatal("a repeated id accepted")
 	}
 }
@@ -106,7 +110,7 @@ func TestQuestionChecks(t *testing.T) {
 		"no instructions":  {NumberWith("", 0, 10, nil), false},
 	}
 	for name, c := range bad {
-		_, err := encodeQuestions(Questions{Q("q", c.q)}, false)
+		_, err := checkQs(Questions{Q("q", c.q)}, false)
 		var v *ValidationError
 		var b *BadRequestError
 		switch {
@@ -122,12 +126,12 @@ func TestQuestionChecks(t *testing.T) {
 		"decimal grid":  NumberWith("?", json.Number("0.25"), 2, 0.5),
 		"truth by side": TruthWith(nil, "yes", nil),
 	} {
-		if _, err := encodeQuestions(Questions{Q("q", q)}, false); err != nil {
+		if _, err := checkQs(Questions{Q("q", q)}, false); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
 	// The grid entry carries the API's shape.
-	_, err := encodeQuestions(Questions{Q("cars", NumberWith("?", 0, 1000, 0.1))}, false)
+	_, err := checkQs(Questions{Q("cars", NumberWith("?", 0, 1000, 0.1))}, false)
 	var v *ValidationError
 	errors.As(err, &v)
 	e := v.Entries[0].(map[string]any)
@@ -137,7 +141,7 @@ func TestQuestionChecks(t *testing.T) {
 }
 
 func TestSystemoneWritesTruthAsNoul(t *testing.T) {
-	got, err := encodeQuestions(Questions{
+	got, err := checkQs(Questions{
 		Q("a", Truth("?")),
 		Q("b", json.RawMessage(`{"instructions":"?", "type" : "truth","criteria":{"true":"y"}}`)),
 		Q("c", Choice("?", []string{"x"})),
@@ -175,10 +179,10 @@ func TestUploadCacheMarginAndEviction(t *testing.T) {
 	c.putLocked(k(1), "upl_soon", time.Now().Add(4*time.Minute))
 	c.putLocked(k(2), "upl_live", time.Now().Add(time.Hour))
 	c.mu.Unlock()
-	if _, ok := c.get(k(1)); ok {
+	if _, ok := c.get(k(1), time.Now()); ok {
 		t.Fatal("an entry within 5 minutes of its expiry was used")
 	}
-	if id, ok := c.get(k(2)); !ok || id != "upl_live" {
+	if hit, ok := c.get(k(2), time.Now()); !ok || hit.ID != "upl_live" {
 		t.Fatal("a live entry was not used")
 	}
 	c.mu.Lock()
@@ -186,7 +190,7 @@ func TestUploadCacheMarginAndEviction(t *testing.T) {
 		c.putLocked(k(i), "upl", time.Now().Add(time.Hour))
 	}
 	c.mu.Unlock()
-	if _, ok := c.get(k(2)); ok || len(c.entries) != cacheEntries {
+	if _, ok := c.get(k(2), time.Now()); ok || len(c.entries) != cacheEntries {
 		t.Fatalf("the least recently used entry stayed, %d entries", len(c.entries))
 	}
 	c.drop([]string{"upl"})
@@ -216,5 +220,47 @@ func TestRetryPolicies(t *testing.T) {
 	var rate *RateLimitError
 	if !errors.As(error(limit), &rate) {
 		t.Fatal("a SessionLimitError is not a RateLimitError")
+	}
+}
+
+// checkQs encodes and checks questions as a request would.
+func checkQs(qs Questions, systemone bool) ([]byte, error) {
+	var qc questionCheck
+	b, err := encodeQuestions(qs, systemone, limits{}, &qc)
+	if err != nil {
+		return nil, err
+	}
+	return b, qc.err()
+}
+
+func TestImageURLRules(t *testing.T) {
+	for url, want := range map[string]string{
+		"http://example.com/a.jpg":            "api_usage_error",
+		"https://user:pw@example.com/a.jpg":   "image_url_refused",
+		"https://example.com:8443/a.jpg":      "image_url_refused",
+		"https://169.254.169.254/a.jpg":       "image_url_refused",
+		"https://[::1]/a.jpg":                 "image_url_refused",
+		"https://[::ffff:10.0.0.1]/a.jpg":     "image_url_refused",
+		"https://[64:ff9b::7f00:1]/a.jpg":     "image_url_refused",
+		"https://example.com:443/a.jpg":       "",
+		"https://8.8.8.8/a.jpg":               "",
+		"https://files.example.com/a.jpg?x=1": "",
+	} {
+		err := checkImageURL("u", url)
+		var bad *BadRequestError
+		switch {
+		case want == "" && err != nil:
+			t.Errorf("%s: refused: %v", url, err)
+		case want != "" && (!errors.As(err, &bad) || bad.ErrorType != want):
+			t.Errorf("%s: got %v, want %s", url, err, want)
+		}
+	}
+}
+
+func TestJSONDepth(t *testing.T) {
+	for in, want := range map[string]int{`"x"`: 0, `{}`: 1, `{"a":[{"b":"[[["}]}`: 3, `["\\\"[",[[]]]`: 3} {
+		if got := jsonDepth([]byte(in)); got != want {
+			t.Errorf("%s: depth %d, want %d", in, got, want)
+		}
 	}
 }

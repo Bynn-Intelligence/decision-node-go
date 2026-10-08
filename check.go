@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"net/netip"
 	"net/url"
 	"strings"
 )
@@ -69,66 +70,250 @@ func (qc *questionCheck) err() error {
 }
 
 // question checks one question in its JSON form against the API's fixed
-// rules. A field of a type the API would refuse with a 422 of its own is left
-// to the server; only the rules below are checked here.
-func (qc *questionCheck) question(id string, raw []byte) (typ string) {
-	var q map[string]json.RawMessage
-	if json.Unmarshal(raw, &q) != nil {
+// rules, in the server's order. systemone selects that path's question
+// types. It returns the question's type, "" when it has none that is read.
+func (qc *questionCheck) question(id string, raw []byte, systemone bool, lim limits) (typ string) {
+	base := []any{"body", "questions", id}
+	q, ok := objectMembers(raw)
+	if !ok {
+		qc.entry("model_type", base, "Input should be a valid dictionary or object", json.RawMessage(raw), nil,
+			fmt.Sprintf("question '%s': must be an object", id))
 		return ""
 	}
-	if json.Unmarshal(q["type"], &typ) != nil {
+	if isNull(q.get("type")) {
+		qc.entry("missing", append(base, "type"), "Field required", json.RawMessage(raw), nil,
+			fmt.Sprintf("question '%s': type: Field required", id))
+		return ""
+	}
+	if json.Unmarshal(q.get("type"), &typ) != nil || !knownType(typ, systemone) {
+		qc.refuse(localBadRequest("api_usage_error", "Invalid request.",
+			fmt.Sprintf("question '%s': unknown type %s; the types are %s", id, compactJSON(q.get("type")), typeList(systemone))))
 		return ""
 	}
 	loc := []any{"body", "questions", id, typ}
+	if v := q.get("instructions"); !isNull(v) && !isSDL(v) {
+		qc.sdl(append(loc, "instructions"), v, fmt.Sprintf("question '%s': instructions must be a string, an object or an array", id))
+	}
+	criteria := q.get("criteria")
 	switch typ {
 	case "choice":
-		if n, ok := countObject(q["criteria"]); ok {
-			switch {
+		most := MaxChoiceOptions
+		if lim.maxChoiceOptions > 0 {
+			most = lim.maxChoiceOptions
+		}
+		opts, isObj := objectMembers(criteria)
+		switch {
+		case isNull(criteria):
+			qc.entry("missing", append(loc, "criteria"), "Field required", json.RawMessage(raw), nil,
+				fmt.Sprintf("question '%s': criteria: Field required", id))
+		case !isObj:
+			qc.entry("dict_type", append(loc, "criteria"), "Input should be a valid dictionary", json.RawMessage(criteria), nil,
+				fmt.Sprintf("question '%s': criteria must be an object of options", id))
+		default:
+			for _, m := range opts {
+				if !isNull(m.value) && !isSDL(m.value) {
+					qc.sdl(append(append([]any(nil), loc...), "criteria", m.name), m.value,
+						fmt.Sprintf("question '%s': option %q must be a string, an object or an array", id, m.name))
+				}
+			}
+			switch n := len(opts); {
 			case n == 0:
 				qc.refuse(localBadRequest("", "Choice question must have at least one choice: "+id,
 					fmt.Sprintf("question '%s': a choice needs at least one option", id)))
-			case n > MaxChoiceOptions:
-				qc.refuse(localBadRequest("", fmt.Sprintf("Too many choices. Must have at most %d choices.", MaxChoiceOptions),
-					fmt.Sprintf("question '%s': a choice takes up to %d options, got %d", id, MaxChoiceOptions, n)))
+			case n > most:
+				qc.refuse(localBadRequest("", fmt.Sprintf("Too many choices. Must have at most %d choices.", most),
+					fmt.Sprintf("question '%s': a choice takes up to %d options, got %d", id, most, n)))
 			}
 		}
 	case "score":
-		n, ok := countArray(q["criteria"])
-		if !ok {
-			n, ok = countObject(q["criteria"])
+		most := MaxScoreLevels
+		if lim.maxScoreLevels > 0 {
+			most = lim.maxScoreLevels
 		}
-		if ok {
-			switch {
-			case n == 0:
-				qc.entry("too_short", append(loc, "criteria"), "List should have at least 1 item after validation, not 0",
-					json.RawMessage(q["criteria"]), nil, fmt.Sprintf("question '%s': a score needs at least one level", id))
-			case n > MaxScoreLevels:
-				qc.refuse(localBadRequest("", fmt.Sprintf("Too many score levels. Must have at most %d levels.", MaxScoreLevels),
-					fmt.Sprintf("question '%s': a score takes up to %d levels, got %d", id, MaxScoreLevels, n)))
+		if isNull(criteria) {
+			qc.entry("missing", append(loc, "criteria"), "Field required", json.RawMessage(raw), nil,
+				fmt.Sprintf("question '%s': criteria: Field required", id))
+			return typ
+		}
+		levels, ok := arrayElements(criteria)
+		if !ok && !systemone {
+			levels, ok = indexedLevels(criteria)
+		}
+		if !ok {
+			qc.entry("list_type", append(loc, "criteria"), "Input should be a valid list", json.RawMessage(criteria), nil,
+				fmt.Sprintf("question '%s': criteria must be a list of levels", id))
+			return typ
+		}
+		if len(levels) == 0 {
+			qc.entry("too_short", append(loc, "criteria"), "List should have at least 1 item after validation, not 0",
+				json.RawMessage(criteria), nil, fmt.Sprintf("question '%s': a score needs at least one level", id))
+			return typ
+		}
+		for i, level := range levels {
+			if !isSDL(level) {
+				qc.sdl(append(append([]any(nil), loc...), "criteria", i), level,
+					fmt.Sprintf("question '%s': level %d must be a string, an object or an array", id, i))
 			}
+		}
+		if len(levels) > most {
+			qc.refuse(localBadRequest("", fmt.Sprintf("Too many score levels. Must have at most %d levels.", most),
+				fmt.Sprintf("question '%s': a score takes up to %d levels, got %d", id, most, len(levels))))
 		}
 	case "truth", "noul":
-		var crit map[string]json.RawMessage
-		if isNull(q["criteria"]) || json.Unmarshal(q["criteria"], &crit) == nil {
-			if isNull(q["instructions"]) && isNull(crit["true"]) && isNull(crit["false"]) {
-				name := "Truth"
-				if typ == "noul" {
-					name = "Noul"
-				}
-				qc.refuse(localBadRequest("", name+" question must have criteria or instructions: "+id,
-					fmt.Sprintf("question '%s': a %s question needs instructions or criteria", id, typ)))
+		sides, isObj := objectMembers(criteria)
+		if !isNull(criteria) && !isObj {
+			qc.entry("dict_type", append(loc, "criteria"), "Input should be a valid dictionary", json.RawMessage(criteria), nil,
+				fmt.Sprintf("question '%s': criteria must be an object", id))
+			return typ
+		}
+		for _, side := range []string{"true", "false"} {
+			if v := sides.get(side); !isNull(v) && !isSDL(v) {
+				qc.sdl(append(append([]any(nil), loc...), "criteria", side), v,
+					fmt.Sprintf("question '%s': criteria.%s must be a string, an object or an array", id, side))
 			}
 		}
+		if isNull(q.get("instructions")) && isNull(sides.get("true")) && isNull(sides.get("false")) {
+			name := "Truth"
+			if typ == "noul" {
+				name = "Noul"
+			}
+			qc.refuse(localBadRequest("", name+" question must have criteria or instructions: "+id,
+				fmt.Sprintf("question '%s': a %s question needs instructions or criteria", id, typ)))
+		}
 	case "number":
-		qc.number(id, q, raw, loc)
+		if lim.gridHeld && lim.maxGridValues == 0 {
+			qc.refuse(localBadRequest("api_usage_error", fmt.Sprintf("Model %s does not answer number questions.", lim.model),
+				fmt.Sprintf("question '%s': model %s does not answer number questions", id, lim.model)))
+			return typ
+		}
+		most := MaxNumberGridValues
+		if lim.maxGridValues > 0 {
+			most = lim.maxGridValues
+		}
+		qc.number(id, q.asMap(), raw, loc, most)
 	}
 	return typ
+}
+
+// sdl adds the three entries the API gives a value that must be a string,
+// an object or an array.
+func (qc *questionCheck) sdl(loc []any, v json.RawMessage, reason string) {
+	for _, e := range []struct{ kind, suffix, msg string }{
+		{"string_type", "str", "Input should be a valid string"},
+		{"dict_type", "dict[any,any]", "Input should be a valid dictionary"},
+		{"list_type", "list[any]", "Input should be a valid list"},
+	} {
+		qc.entry(e.kind, append(append([]any(nil), loc...), e.suffix), e.msg, json.RawMessage(v), nil, reason)
+	}
+}
+
+func knownType(typ string, systemone bool) bool {
+	if systemone {
+		return typ == "noul" || typ == "choice" || typ == "score"
+	}
+	return typ == "truth" || typ == "noul" || typ == "choice" || typ == "score" || typ == "number"
+}
+
+func typeList(systemone bool) string {
+	if systemone {
+		return "noul, choice and score on /v1/systemone"
+	}
+	return "truth, noul, choice, score and number"
+}
+
+// isSDL reports a JSON string, object or array.
+func isSDL(raw json.RawMessage) bool {
+	raw = bytes.TrimSpace(raw)
+	return len(raw) > 0 && (raw[0] == '"' || raw[0] == '{' || raw[0] == '[')
+}
+
+// member is one member of a JSON object, in document order.
+type member struct {
+	name  string
+	value json.RawMessage
+}
+
+type members []member
+
+func (ms members) get(name string) json.RawMessage {
+	for i := len(ms) - 1; i >= 0; i-- {
+		if ms[i].name == name {
+			return ms[i].value
+		}
+	}
+	return nil
+}
+
+func (ms members) asMap() map[string]json.RawMessage {
+	m := make(map[string]json.RawMessage, len(ms))
+	for _, x := range ms {
+		m[x.name] = x.value
+	}
+	return m
+}
+
+// objectMembers reads a JSON object's members in order.
+func objectMembers(raw json.RawMessage) (members, bool) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || raw[0] != '{' {
+		return nil, false
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if _, err := dec.Token(); err != nil {
+		return nil, false
+	}
+	var out members
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return nil, false
+		}
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return nil, false
+		}
+		out = append(out, member{name: t.(string), value: v})
+	}
+	if out == nil {
+		out = members{}
+	}
+	return out, true
+}
+
+func arrayElements(raw json.RawMessage) ([]json.RawMessage, bool) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || raw[0] != '[' {
+		return nil, false
+	}
+	var a []json.RawMessage
+	if json.Unmarshal(raw, &a) != nil {
+		return nil, false
+	}
+	return a, true
+}
+
+// indexedLevels reads levels sent as an object keyed "0" to "K-1".
+func indexedLevels(raw json.RawMessage) ([]json.RawMessage, bool) {
+	ms, ok := objectMembers(raw)
+	if !ok {
+		return nil, false
+	}
+	m := ms.asMap()
+	out := make([]json.RawMessage, len(m))
+	for i := range out {
+		v, ok := m[fmt.Sprint(i)]
+		if !ok {
+			return nil, false
+		}
+		out[i] = v
+	}
+	return out, true
 }
 
 // number checks a number question's grid as the API builds it:
 // exact decimals from the JSON text, one 422 entry per faulty field, then the
 // decimal bound, min above max and the grid size, then the instructions.
-func (qc *questionCheck) number(id string, q map[string]json.RawMessage, raw []byte, loc []any) {
+func (qc *questionCheck) number(id string, q map[string]json.RawMessage, raw []byte, loc []any, most int) {
 	defaults := map[string]string{"min": "0", "max": "255", "step": "1"}
 	values := map[string]*big.Rat{}
 	ok := true
@@ -217,10 +402,10 @@ func (qc *questionCheck) number(id string, q map[string]json.RawMessage, raw []b
 	span := new(big.Rat).Quo(new(big.Rat).Sub(hi, lo), step)
 	n := new(big.Int).Quo(span.Num(), span.Denom())
 	n.Add(n, big.NewInt(1))
-	if n.Cmp(big.NewInt(MaxNumberGridValues)) > 0 {
-		qc.entry("too_long", loc, fmt.Sprintf("Grid should have at most %d values, not %s", MaxNumberGridValues, n),
-			json.RawMessage(raw), map[string]any{"field_type": "Grid", "max_length": MaxNumberGridValues, "actual_length": json.Number(n.String())},
-			fmt.Sprintf("question '%s': the grid holds %s values, the limit is %d; narrow the range or widen the step", id, n, MaxNumberGridValues))
+	if n.Cmp(big.NewInt(int64(most))) > 0 {
+		qc.entry("too_long", loc, fmt.Sprintf("Grid should have at most %d values, not %s", most, n),
+			json.RawMessage(raw), map[string]any{"field_type": "Grid", "max_length": most, "actual_length": json.Number(n.String())},
+			fmt.Sprintf("question '%s': the grid holds %s values, the limit is %d; narrow the range or widen the step", id, n, most))
 		return
 	}
 	var text string
@@ -231,13 +416,17 @@ func (qc *questionCheck) number(id string, q map[string]json.RawMessage, raw []b
 }
 
 // checkImages checks a request's images against the API's fixed rules: at
-// most 4 (URLs included), ids present and unique, URLs https and at most
-// 2,048 characters, local bytes JPEG, PNG or WebP by their first bytes and
+// most 4 (URLs included), ids present and unique, URLs https and fetchable by
+// the server's rules, local bytes JPEG, PNG or WebP by their first bytes and
 // matching a declared type, at most 10 MB and 40 megapixels.
-func checkImages(images []Image) error {
-	if len(images) > MaxImages {
-		return localBadRequest("api_usage_error", fmt.Sprintf("Too many images. Must have at most %d images.", MaxImages),
-			fmt.Sprintf("a request takes up to %d images, got %d", MaxImages, len(images)))
+func checkImages(images []Image, lim limits) error {
+	most := MaxImages
+	if lim.maxImages > 0 {
+		most = lim.maxImages
+	}
+	if len(images) > most {
+		return localBadRequest("api_usage_error", fmt.Sprintf("Too many images. Must have at most %d images.", most),
+			fmt.Sprintf("a request takes up to %d images, got %d", most, len(images)))
 	}
 	seen := make(map[string]bool, len(images))
 	for i, img := range images {
@@ -248,7 +437,7 @@ func checkImages(images []Image) error {
 			return usageError("Duplicate image id: " + img.id)
 		}
 		seen[img.id] = true
-		if err := checkImage(img); err != nil {
+		if err := checkImage(img, lim); err != nil {
 			return err
 		}
 	}
@@ -256,13 +445,10 @@ func checkImages(images []Image) error {
 }
 
 // checkImage checks one image, whatever request or frame it travels in.
-func checkImage(img Image) error {
+func checkImage(img Image, lim limits) error {
 	switch {
 	case img.url != "":
-		if !httpsURL(img.url) || len(img.url) > MaxImageURLChars {
-			return usageError(fmt.Sprintf("Image %s: only https URLs of at most %d characters are accepted.", img.id, MaxImageURLChars))
-		}
-		return nil
+		return checkImageURL(img.id, img.url)
 	case img.uploadID != "":
 		if img.mediaType != "" && !mediaOK[img.mediaType] {
 			return usageError(fmt.Sprintf("Image %s: media_type must be image/jpeg, image/png or image/webp.", img.id))
@@ -271,13 +457,17 @@ func checkImage(img Image) error {
 	case img.src == nil:
 		return usageError(fmt.Sprintf("Image %s needs exactly one of data, url or upload_id.", img.id))
 	}
+	biggest := MaxImageBytes
+	if lim.maxImageBytes > 0 {
+		biggest = lim.maxImageBytes
+	}
 	found, w, h, dimsOK := img.src.info()
 	switch {
 	case found == "":
 		return usageError(fmt.Sprintf("Image %s is not a JPEG, PNG or WebP image.", img.id))
 	case img.mediaType != "" && img.mediaType != found:
 		return usageError(fmt.Sprintf("Image %s could not be decoded as %s.", img.id, img.mediaType))
-	case img.src.oversize || len(img.src.data) > MaxImageBytes:
+	case img.src.oversize || len(img.src.data) > biggest:
 		return usageError(fmt.Sprintf("Image %s is larger than 10 MB.", img.id))
 	case !dimsOK:
 		return usageError(fmt.Sprintf("Image %s: its header cannot be read.", img.id))
@@ -287,42 +477,160 @@ func checkImage(img Image) error {
 	return nil
 }
 
-func usageError(message string) error { return localBadRequest("api_usage_error", message, message) }
+// blockedRanges are the addresses the server never fetches an image from.
+var blockedRanges = func() []netip.Prefix {
+	var out []netip.Prefix
+	for _, s := range []string{
+		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
+		"192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15",
+		"198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4", "255.255.255.255/32",
+		"::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8", "2001:db8::/32", "fd00:ec2::254/128",
+	} {
+		out = append(out, netip.MustParsePrefix(s))
+	}
+	return out
+}()
 
-// httpsURL accepts an absolute https URL with a host.
-func httpsURL(raw string) bool {
-	u, err := url.Parse(raw)
-	return err == nil && u.Scheme == "https" && u.Host != ""
+var nat64 = netip.MustParsePrefix("64:ff9b::/96")
+
+// blockedAddress reports a literal IP address in a blocked range, an
+// IPv4-mapped or NAT64 address judged by the IPv4 address it embeds. A DNS
+// name is the server's to resolve and judge.
+func blockedAddress(host string) bool {
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	addr = addr.WithZone("")
+	switch {
+	case addr.Is4In6():
+		addr = addr.Unmap()
+	case addr.Is6() && nat64.Contains(addr):
+		b := addr.As16()
+		addr = netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})
+	}
+	for _, p := range blockedRanges {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
+
+// checkImageURL applies the server's URL rules that need no network: https
+// (else api_usage_error), then image_url_refused for the length, user
+// information, a port other than 443, no host or a blocked literal address.
+func checkImageURL(id, raw string) error {
+	if !strings.HasPrefix(raw, "https://") {
+		return usageError(fmt.Sprintf("Image %s: only https URLs are accepted.", id))
+	}
+	reason := ""
+	u, err := url.Parse(raw)
+	switch {
+	case len(raw) > MaxImageURLChars:
+		reason = fmt.Sprintf("the URL is %d characters, over the limit of %d", len(raw), MaxImageURLChars)
+	case err != nil:
+		reason = "the URL cannot be read"
+	case u.User != nil:
+		reason = "the URL carries user information"
+	case u.Port() != "" && u.Port() != "443":
+		reason = "the URL uses a port other than 443"
+	case u.Hostname() == "":
+		reason = "the URL has no host"
+	case blockedAddress(u.Hostname()):
+		reason = "the URL resolves to a private address"
+	}
+	if reason != "" {
+		msg := fmt.Sprintf("Image '%s': %s.", id, reason)
+		return localBadRequest("image_url_refused", msg, msg)
+	}
+	return nil
+}
+
+// limits are the values the client holds from GET /v1/models for one model,
+// which replace or add to the documented bounds of the local checks. The
+// zero value holds nothing, and every check then uses the documented bound or
+// is left to the server.
+type limits struct {
+	model            string
+	maxChoiceOptions int
+	maxScoreLevels   int
+	maxImages        int
+	maxImageBytes    int
+	gridHeld         bool
+	maxGridValues    int
+	sessionsHeld     bool
+	sessionsEnabled  bool
+	maxWindow        int
+	maxTTLSeconds    int
+	requestsPerBatch int
+	maxCustomIDChars int
+}
+
+func limitsOf(name string, m ModelInfo) limits {
+	l := limits{model: name}
+	num := func(key string) (int, bool) {
+		f, ok := m.Raw[key].(float64)
+		return int(f), ok
+	}
+	l.maxChoiceOptions, _ = num("max_choice_options")
+	l.maxScoreLevels, _ = num("max_score_levels")
+	l.maxImages, _ = num("max_images")
+	l.maxImageBytes, _ = num("max_image_bytes")
+	l.maxGridValues, l.gridHeld = num("number_max_grid_values")
+	if m.Sessions != nil {
+		if enabled, ok := m.Raw["sessions"].(map[string]any)["enabled"].(bool); ok {
+			l.sessionsHeld, l.sessionsEnabled = true, enabled
+		}
+		l.maxWindow, l.maxTTLSeconds = m.Sessions.MaxWindow, m.Sessions.MaxTTLSeconds
+	}
+	if m.Batch != nil {
+		l.requestsPerBatch, l.maxCustomIDChars = m.Batch.RequestsPerBatch, m.Batch.MaxCustomIDChars
+	}
+	return l
+}
+
+// maxNesting is the most objects and arrays a body may hold inside each
+// other, its own object included.
+const maxNesting = 128
+
+// jsonDepth returns how many objects and arrays sit inside each other in a
+// JSON text, read without decoding it.
+func jsonDepth(b []byte) int {
+	depth, deepest, inString := 0, 0, false
+	for i := 0; i < len(b); i++ {
+		c := b[i]
+		switch {
+		case inString:
+			if c == '\\' {
+				i++
+			} else if c == '"' {
+				inString = false
+			}
+		case c == '"':
+			inString = true
+		case c == '{' || c == '[':
+			depth++
+			deepest = max(deepest, depth)
+		case c == '}' || c == ']':
+			depth--
+		}
+	}
+	return deepest
+}
+
+func checkNesting(depth int) error {
+	if depth > maxNesting {
+		return localBadRequest("api_usage_error", "Invalid request.",
+			fmt.Sprintf("the request nests %d objects and arrays inside each other; the limit is %d", depth, maxNesting))
+	}
+	return nil
+}
+
+func usageError(message string) error { return localBadRequest("api_usage_error", message, message) }
 
 func isNull(raw json.RawMessage) bool {
 	return len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
-}
-
-// countObject returns the number of members of a JSON object.
-func countObject(raw json.RawMessage) (int, bool) {
-	raw = bytes.TrimSpace(raw)
-	if len(raw) == 0 || raw[0] != '{' {
-		return 0, false
-	}
-	var m map[string]json.RawMessage
-	if json.Unmarshal(raw, &m) != nil {
-		return 0, false
-	}
-	return len(m), true
-}
-
-// countArray returns the number of elements of a JSON array.
-func countArray(raw json.RawMessage) (int, bool) {
-	raw = bytes.TrimSpace(raw)
-	if len(raw) == 0 || raw[0] != '[' {
-		return 0, false
-	}
-	var a []json.RawMessage
-	if json.Unmarshal(raw, &a) != nil {
-		return 0, false
-	}
-	return len(a), true
 }
 
 // jsonNumber reads a JSON number literal as an exact rational.

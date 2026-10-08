@@ -916,7 +916,7 @@ func TestResponseHook(t *testing.T) {
 			}
 			r.Header.Del("x-request-id")
 		}))
-	d, err := c.Decide(context.WithValue(context.Background(), key{}, "v"), dn.Request{State: 1, Questions: oneTruth()})
+	d, err := c.Decide(context.WithValue(context.Background(), key{}, "v"), dn.Request{State: "s", Questions: oneTruth()})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -52,9 +52,19 @@ type uploadCache struct {
 }
 
 type flight struct {
-	done     chan struct{}
-	uploadID string
-	err      error
+	done   chan struct{}
+	result UploadResult
+	err    error
+}
+
+// UploadResult is one image's upload.
+type UploadResult struct {
+	// ID is the upload_id: name the image in later calls with ImageUpload.
+	ID string
+	// ExpiresAt is when the upload stops being usable as a reference, as the
+	// API sent it. Zero for an id given with ImageUpload, whose expiry the
+	// client does not know.
+	ExpiresAt time.Time
 }
 
 func newUploadCache() *uploadCache {
@@ -67,26 +77,26 @@ func (c *uploadCache) empty() bool {
 	return len(c.entries) == 0
 }
 
-// get returns the live upload id for the key.
-func (c *uploadCache) get(k cacheKey) (string, bool) {
+// get returns the live upload for the key, judged at now.
+func (c *uploadCache) get(k cacheKey, now time.Time) (UploadResult, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.getLocked(k)
+	return c.getLocked(k, now)
 }
 
-func (c *uploadCache) getLocked(k cacheKey) (string, bool) {
+func (c *uploadCache) getLocked(k cacheKey, now time.Time) (UploadResult, bool) {
 	el, ok := c.entries[k]
 	if !ok {
-		return "", false
+		return UploadResult{}, false
 	}
 	e := el.Value.(*cacheEntry)
-	if !time.Now().Before(e.expiresAt.Add(-cacheMargin)) {
+	if !now.Before(e.expiresAt.Add(-cacheMargin)) {
 		c.order.Remove(el)
 		delete(c.entries, k)
-		return "", false
+		return UploadResult{}, false
 	}
 	c.order.MoveToFront(el)
-	return e.uploadID, true
+	return UploadResult{ID: e.uploadID, ExpiresAt: e.expiresAt}, true
 }
 
 func (c *uploadCache) putLocked(k cacheKey, uploadID string, expiresAt time.Time) {
@@ -158,10 +168,11 @@ func (c *Client) placeImages(ctx context.Context, images []Image, withID bool) (
 	upload := total >= c.inlineThreshold
 	var misses []int
 	if upload || !c.uploads.empty() {
+		now := c.now()
 		for _, i := range local {
-			if id, ok := c.uploads.get(images[i].cacheKey()); ok {
-				p.wires[i] = uploadWire(images[i].id, id, "", withID)
-				p.placed = append(p.placed, id)
+			if hit, ok := c.uploads.get(images[i].cacheKey(), now); ok {
+				p.wires[i] = uploadWire(images[i].id, hit.ID, "", withID)
+				p.placed = append(p.placed, hit.ID)
 				continue
 			}
 			misses = append(misses, i)
@@ -182,42 +193,44 @@ func (c *Client) placeImages(ctx context.Context, images []Image, withID bool) (
 	for j, i := range misses {
 		toUpload[j] = images[i]
 	}
-	ids, err := c.uploadImages(ctx, toUpload)
+	ups, err := c.uploadImages(ctx, toUpload)
 	if err != nil {
 		return placement{}, err
 	}
 	for j, i := range misses {
-		p.wires[i] = uploadWire(images[i].id, ids[j], "", withID)
-		p.placed = append(p.placed, ids[j])
+		p.wires[i] = uploadWire(images[i].id, ups[j].ID, "", withID)
+		p.placed = append(p.placed, ups[j].ID)
 	}
 	return p, nil
 }
 
-// Upload uploads local images, whatever their size, and returns the
-// upload_id of each, in order: one POST /v1/uploads for the images not in
-// the cache, then one PUT each, in parallel. An image uploaded before by this
-// client is not uploaded again while its upload is live. An image made with
-// ImageUpload returns its own id. A URL image cannot be uploaded: that is an
-// argument error. Name an upload in later calls with ImageUpload.
-func (c *Client) Upload(ctx context.Context, images []Image) ([]string, error) {
+// Upload uploads local images, whatever their size, and returns the upload
+// of each, in order: its upload_id and when it expires. The images not in the
+// cache go in one POST /v1/uploads, then one PUT each, in parallel. An image
+// uploaded before by this client is not uploaded again while its upload is
+// live. An image made with ImageUpload returns its own id with a zero
+// ExpiresAt. A URL image cannot be uploaded: that is an argument error. Name
+// an upload in later calls with ImageUpload.
+func (c *Client) Upload(ctx context.Context, images []Image) ([]UploadResult, error) {
 	if c.err != nil {
 		return nil, c.err
 	}
-	if err := checkImages(images); err != nil {
+	if err := checkImages(images, c.limitsFor("")); err != nil {
 		return nil, err
 	}
-	out := make([]string, len(images))
+	out := make([]UploadResult, len(images))
 	var todo []Image
 	var where []int
+	now := c.now()
 	for i, img := range images {
 		switch {
 		case img.url != "":
 			return nil, fmt.Errorf("decisionnode: image %q is a URL; only local bytes can be uploaded", img.id)
 		case img.uploadID != "":
-			out[i] = img.uploadID
+			out[i] = UploadResult{ID: img.uploadID}
 		default:
-			if id, ok := c.uploads.get(img.cacheKey()); ok {
-				out[i] = id
+			if hit, ok := c.uploads.get(img.cacheKey(), now); ok {
+				out[i] = hit
 				continue
 			}
 			todo = append(todo, img)
@@ -227,37 +240,38 @@ func (c *Client) Upload(ctx context.Context, images []Image) ([]string, error) {
 	if len(todo) == 0 {
 		return out, nil
 	}
-	ids, err := c.uploadImages(ctx, todo)
+	ups, err := c.uploadImages(ctx, todo)
 	if err != nil {
 		return nil, err
 	}
 	for j, i := range where {
-		out[i] = ids[j]
+		out[i] = ups[j]
 	}
 	return out, nil
 }
 
-// uploadImages uploads local images and returns their upload ids, in order.
+// uploadImages uploads local images and returns their uploads, in order.
 // Identical bytes are uploaded once, also across concurrent calls on this
 // client, and every new upload goes into the cache.
-func (c *Client) uploadImages(ctx context.Context, imgs []Image) ([]string, error) {
+func (c *Client) uploadImages(ctx context.Context, imgs []Image) ([]UploadResult, error) {
 	keys := make([]cacheKey, len(imgs))
 	for i, img := range imgs {
 		keys[i] = img.cacheKey()
 	}
-	ids := make(map[cacheKey]string, len(imgs))
+	ids := make(map[cacheKey]UploadResult, len(imgs))
 	for {
 		var mine []Image
 		var mineKeys []cacheKey
 		var waits []*flight
 		var waitKeys []cacheKey
+		now := c.now()
 		c.uploads.mu.Lock()
 		for i, k := range keys {
 			if _, done := ids[k]; done || containsKey(mineKeys, k) || containsKey(waitKeys, k) {
 				continue
 			}
-			if id, ok := c.uploads.getLocked(k); ok {
-				ids[k] = id
+			if hit, ok := c.uploads.getLocked(k, now); ok {
+				ids[k] = hit
 				continue
 			}
 			if f, ok := c.uploads.flights[k]; ok {
@@ -273,7 +287,7 @@ func (c *Client) uploadImages(ctx context.Context, imgs []Image) ([]string, erro
 
 		var err error
 		if len(mine) > 0 {
-			var got []string
+			var got []UploadResult
 			got, err = c.uploadNow(ctx, mine, mineKeys)
 			for j, k := range mineKeys {
 				if err == nil {
@@ -290,7 +304,7 @@ func (c *Client) uploadImages(ctx context.Context, imgs []Image) ([]string, erro
 			}
 			switch {
 			case f.err == nil:
-				ids[waitKeys[j]] = f.uploadID
+				ids[waitKeys[j]] = f.result
 			case isCanceled(f.err) && ctx.Err() == nil:
 				// The other call was canceled, not the upload refused: upload
 				// these bytes here.
@@ -306,7 +320,7 @@ func (c *Client) uploadImages(ctx context.Context, imgs []Image) ([]string, erro
 			break
 		}
 	}
-	out := make([]string, len(imgs))
+	out := make([]UploadResult, len(imgs))
 	for i, k := range keys {
 		out[i] = ids[k]
 	}
@@ -336,8 +350,10 @@ type presigned struct {
 }
 
 // uploadNow presigns the images in one call, PUTs them in parallel, caches
-// them and settles their flights.
-func (c *Client) uploadNow(ctx context.Context, imgs []Image, keys []cacheKey) (ids []string, err error) {
+// them and settles their flights. A PUT refused 403 after its URL's lifetime
+// (expires_in from the presign answer, by the client's clock) is presigned
+// again once.
+func (c *Client) uploadNow(ctx context.Context, imgs []Image, keys []cacheKey) (ids []UploadResult, err error) {
 	defer func() {
 		c.uploads.mu.Lock()
 		for j, k := range keys {
@@ -349,13 +365,70 @@ func (c *Client) uploadNow(ctx context.Context, imgs []Image, keys []cacheKey) (
 			if err != nil {
 				f.err = err
 			} else {
-				f.uploadID = ids[j]
+				f.result = ids[j]
 			}
 			close(f.done)
 		}
 		c.uploads.mu.Unlock()
 	}()
 
+	ups, urlsExpire, err := c.presign(ctx, imgs, keys)
+	if err != nil {
+		return nil, err
+	}
+	pctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errs := make([]error, len(imgs))
+	var wg sync.WaitGroup
+	for i := range imgs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			err := c.put(pctx, ups[i], imgs[i].src.data)
+			var e *Error
+			if errors.As(err, &e) && e.Status == http.StatusForbidden && !c.now().Before(urlsExpire) {
+				// The URL outlived its lifetime before the bytes landed:
+				// presign this image again, once.
+				var again []presigned
+				if again, _, err = c.presign(pctx, imgs[i:i+1], keys[i:i+1]); err == nil {
+					ups[i] = again[0]
+					err = c.put(pctx, ups[i], imgs[i].src.data)
+				}
+			}
+			if errs[i] = err; err != nil {
+				cancel()
+			}
+		}(i)
+	}
+	wg.Wait()
+	for _, e := range errs {
+		// The first error that is not the cancellation the others caused.
+		if e != nil && !(isCanceled(e) && ctx.Err() == nil) {
+			return nil, e
+		}
+	}
+	for _, e := range errs {
+		if e != nil {
+			return nil, e
+		}
+	}
+	ids = make([]UploadResult, len(imgs))
+	c.uploads.mu.Lock()
+	for i, up := range ups {
+		ids[i] = UploadResult{ID: up.UploadID}
+		if t, perr := time.Parse(time.RFC3339, up.ExpiresAt); perr == nil {
+			ids[i].ExpiresAt = t
+			c.uploads.putLocked(keys[i], up.UploadID, t)
+		}
+	}
+	c.uploads.mu.Unlock()
+	return ids, nil
+}
+
+// presign asks POST /v1/uploads for one URL per image and checks every URL
+// before any byte is sent. It returns when the URLs stop being valid, by the
+// client's clock.
+func (c *Client) presign(ctx context.Context, imgs []Image, keys []cacheKey) ([]presigned, time.Time, error) {
 	type file struct {
 		ContentType string `json:"content_type"`
 		ByteSize    int    `json:"byte_size"`
@@ -375,62 +448,32 @@ func (c *Client) uploadNow(ctx context.Context, imgs []Image, keys []cacheKey) (
 	}
 	payload, err := marshal(map[string]any{"files": files})
 	if err != nil {
-		return nil, encodeError(err)
+		return nil, time.Time{}, encodeError(err)
 	}
 	resp, err := c.doPayload(ctx, http.MethodPost, "/v1/uploads", payload)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	var answer struct {
-		Uploads []presigned `json:"uploads"`
+		Uploads   []presigned `json:"uploads"`
+		ExpiresIn *float64    `json:"expires_in"`
 	}
 	if err := json.Unmarshal(resp.data, &answer); err != nil {
-		return nil, invalidResponse(resp, err)
+		return nil, time.Time{}, invalidResponse(resp, err)
 	}
 	if len(answer.Uploads) != len(imgs) {
-		return nil, invalidResponse(resp, fmt.Errorf("%d uploads for %d files", len(answer.Uploads), len(imgs)))
+		return nil, time.Time{}, invalidResponse(resp, fmt.Errorf("%d uploads for %d files", len(answer.Uploads), len(imgs)))
 	}
-	// Every storage URL is checked before any byte is sent.
 	for _, up := range answer.Uploads {
 		if err := checkStorageURL(up.URL); err != nil {
-			return nil, err
+			return nil, time.Time{}, err
 		}
 	}
-	pctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	errs := make([]error, len(imgs))
-	var wg sync.WaitGroup
-	for i := range imgs {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			if errs[i] = c.put(pctx, answer.Uploads[i], imgs[i].src.data); errs[i] != nil {
-				cancel()
-			}
-		}(i)
+	life := 300 * time.Second
+	if answer.ExpiresIn != nil && *answer.ExpiresIn > 0 {
+		life = time.Duration(*answer.ExpiresIn * float64(time.Second))
 	}
-	wg.Wait()
-	for _, e := range errs {
-		// The first error that is not the cancellation the others caused.
-		if e != nil && !(isCanceled(e) && ctx.Err() == nil) {
-			return nil, e
-		}
-	}
-	for _, e := range errs {
-		if e != nil {
-			return nil, e
-		}
-	}
-	ids = make([]string, len(imgs))
-	c.uploads.mu.Lock()
-	for i, up := range answer.Uploads {
-		ids[i] = up.UploadID
-		if t, perr := time.Parse(time.RFC3339, up.ExpiresAt); perr == nil {
-			c.uploads.putLocked(keys[i], up.UploadID, t)
-		}
-	}
-	c.uploads.mu.Unlock()
-	return ids, nil
+	return answer.Uploads, c.now().Add(life), nil
 }
 
 // checkStorageURL accepts an https storage URL, or plain http on the local

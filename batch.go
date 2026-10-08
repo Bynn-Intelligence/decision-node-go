@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -29,11 +30,15 @@ const (
 	ndjson = "application/x-ndjson"
 )
 
-// BatchRequest is one line of a batch: a decide request and its custom id,
-// unique within the batch. Its images follow the inline threshold per line;
-// uploaded ones are held by the batch.
+// BatchRequest is one line of a batch: a decide request and its custom id.
+// Its images follow the inline threshold per line; uploaded ones are held by
+// the batch.
 type BatchRequest struct {
-	CustomID string
+	// CustomID names the line in the results: 1 to 512 characters, unique
+	// within the batch. It is required; a pointer so a missing id and an
+	// empty one are told apart, as the API tells them. Set it with
+	// Ptr("ticket-1").
+	CustomID *string
 	Request
 }
 
@@ -92,11 +97,12 @@ type BatchPage struct {
 	Raw        map[string]any
 }
 
-// BatchListOptions pages List. A zero field is left to the server: offset
-// 0, limit 20.
+// BatchListOptions pages List. A nil field is left to the server: offset 0,
+// limit 20. Offset is 0 or more and Limit 1 to 100; anything else is refused
+// locally with a *BadRequestError.
 type BatchListOptions struct {
-	Offset int
-	Limit  int
+	Offset *int
+	Limit  *int
 }
 
 // BatchResult is one line of a batch's results, in upload order.
@@ -158,7 +164,7 @@ func (b *BatchService) Add(ctx context.Context, batchID string, reqs []BatchRequ
 		return nil, b.c.err
 	}
 	if len(reqs) == 0 {
-		return nil, errors.New("decisionnode: add needs at least one request")
+		return nil, usageError("The call holds no requests.")
 	}
 	lines, err := b.c.batchLines(ctx, reqs)
 	if err != nil {
@@ -237,11 +243,17 @@ func (b *BatchService) List(ctx context.Context, opts BatchListOptions) (*BatchP
 		return nil, b.c.err
 	}
 	q := url.Values{}
-	if opts.Offset > 0 {
-		q.Set("offset", strconv.Itoa(opts.Offset))
+	if opts.Offset != nil {
+		if *opts.Offset < 0 {
+			return nil, usageError(fmt.Sprintf("Query parameter offset must be an integer of 0 or more, got %d.", *opts.Offset))
+		}
+		q.Set("offset", strconv.Itoa(*opts.Offset))
 	}
-	if opts.Limit > 0 {
-		q.Set("limit", strconv.Itoa(opts.Limit))
+	if opts.Limit != nil {
+		if *opts.Limit < 1 || *opts.Limit > 100 {
+			return nil, usageError(fmt.Sprintf("Query parameter limit must be an integer from 1 to 100, got %d.", *opts.Limit))
+		}
+		q.Set("limit", strconv.Itoa(*opts.Limit))
 	}
 	path := "/v1/batches"
 	if len(q) > 0 {
@@ -406,11 +418,13 @@ func (c *Client) RunBatch(ctx context.Context, reqs []BatchRequest, opts RunBatc
 // or uploaded, per line) and encodes the lines, each ending in a newline.
 // Nothing is sent when a request is invalid.
 func (c *Client) batchLines(ctx context.Context, reqs []BatchRequest) ([][]byte, error) {
+	if err := c.checkLines(reqs); err != nil {
+		return nil, err
+	}
 	preps := make([]*prepared, len(reqs))
 	withImages := false
 	for i := range reqs {
-		id := reqs[i].CustomID
-		p, err := c.prepare(reqs[i].Request, false, &id)
+		p, err := c.prepare(reqs[i].Request, false, reqs[i].CustomID)
 		if err != nil {
 			var apiErr *Error
 			if errors.As(err, &apiErr) {
@@ -458,6 +472,39 @@ func (c *Client) batchLines(ctx context.Context, reqs []BatchRequest) ([][]byte,
 		}
 	}
 	return lines, nil
+}
+
+// checkLines applies the custom_id rules of one call, lines numbered from 1,
+// and the batch limits the client holds from /v1/models.
+func (c *Client) checkLines(reqs []BatchRequest) error {
+	lim := c.limitsFor("")
+	if lim.requestsPerBatch > 0 && len(reqs) > lim.requestsPerBatch {
+		return usageError(fmt.Sprintf("The batch would hold %d requests. The limit is %d.", len(reqs), lim.requestsPerBatch))
+	}
+	longest := 512
+	if lim.maxCustomIDChars > 0 {
+		longest = lim.maxCustomIDChars
+	}
+	seen := make(map[string]bool, len(reqs))
+	for i, r := range reqs {
+		n := i + 1
+		if r.CustomID == nil {
+			return usageError(fmt.Sprintf("Line %d has no custom_id.", n))
+		}
+		id := *r.CustomID
+		if chars := utf8.RuneCountInString(id); chars < 1 || chars > longest {
+			return usageError(fmt.Sprintf("Line %d: custom_id must be a string of 1 to %d characters.", n, longest))
+		}
+		if seen[id] {
+			shown, _ := marshal(id)
+			if len(shown) > 64 {
+				shown = append(shown[:64:64], "..."...)
+			}
+			return usageError(fmt.Sprintf("Line %d: custom_id %s is already in the batch.", n, shown))
+		}
+		seen[id] = true
+	}
+	return nil
 }
 
 func parseBatchResponse(resp *response) (*Batch, error) {

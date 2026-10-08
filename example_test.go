@@ -215,7 +215,7 @@ func ExampleClient_RunBatch() {
 	var reqs []dn.BatchRequest
 	for i, ticket := range []string{"I was charged twice.", "The app crashes on start."} {
 		reqs = append(reqs, dn.BatchRequest{
-			CustomID: fmt.Sprintf("ticket-%d", i+1),
+			CustomID: dn.Ptr(fmt.Sprintf("ticket-%d", i+1)),
 			Request: dn.Request{
 				State:     ticket,
 				Questions: dn.Questions{dn.Q("route", dn.Choice("Where should this go?", []string{"billing", "bug"}))},
