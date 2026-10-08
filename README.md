@@ -169,23 +169,31 @@ d, err := client.Decide(ctx, dn.Request{
 | `dn.ImageReader(id, r, mediaType)` | The bytes read from an `io.Reader`, read when the `Image` is made. |
 | `dn.ImageUpload(id, uploadID, mediaType)` | An upload made earlier (`client.Upload`), less than an hour old. |
 
-The model sees each image as "Picture 1", "Picture 2", ... with its id beside it, numbered from 1 in the order of `Images`, and each video as "Video 1", "Video 2", ... in the order of `Videos`, numbered separately. Text in the state, the instructions or a criterion can refer to an image by position ("Picture 2", "image 2", "the second image", "the last image") or by its id ("the receipt", "`receipt`"), and to a video the same way ("Video 1" or its id):
-
-```go
-d, err := client.Decide(ctx, dn.Request{
-	Images: []dn.Image{
-		dn.ImageURL("receipt", "https://files.example.com/claims/4411/receipt.jpg"),
-		dn.ImageURL("statement", "https://files.example.com/claims/4411/statement.png"),
-	},
-	Questions: dn.Questions{
-		dn.Q("charged", dn.Truth("Does the total in Picture 1 match the charge on the statement?")),
-	},
-})
-```
-
 Every image is checked before anything is sent: at most 16 a request (URLs included; a 17th is the API's `*ValidationError` with a `too_long` entry), ids present and unique, local bytes JPEG, PNG or WebP by their first bytes (and matching a given media type), at most 10 MB, at most 40 megapixels read from the image header. Any other failure is the API's own `*BadRequestError` with no status, and nothing is sent. `Upload` takes up to 16 images a call. No image is resized or re-encoded.
 
 Local images travel the faster way for their size. When a request's local images together are under `dn.DefaultInlineThreshold` (524,288 bytes; `dn.WithInlineThreshold` changes it) they go inline as base64. At or above it they are uploaded first: one `POST /v1/uploads` for all of them, then the bytes straight to storage, in parallel, then the request names them by `upload_id`. The client remembers what it uploaded, by the bytes' SHA-256, in memory, until 5 minutes before the upload expires: the same bytes in a later call, in another request of `DecideMany`, in a session frame or a batch line are named by their `upload_id` whatever their size, and are never uploaded twice at once. If the server answers that an upload the client named has expired or is gone, the client uploads it again and sends the request once more; that does not count as a retry.
+
+#### Referring to images and videos
+
+There are two ways to say which image a question is about:
+
+1. **By id (recommended).** Give each image a short, meaningful id and use it in the instructions, in backticks: "Does the total on `receipt` match the amount in the claim?"
+2. **By number.** Images are numbered from 1 in the order of `Images`: "image 2", "the second image", "Picture 2" and "the last image" all work.
+
+The model sees each image as `Picture 1 (receipt):`, `Picture 2 (claim_photo):`, so both ways point to the same image. Prefer ids: they stay right when images are added or reordered. Use names, not digits, as ids (`front`, not `2`). Videos work the same way, by id or by number ("video 1"), numbered separately in the order of `Videos`. The `image` of a point or box question takes the id.
+
+```go
+d, err := client.Decide(ctx, dn.Request{
+	State: "Expense claim 4411: 740.00 EUR.",
+	Images: []dn.Image{
+		dn.ImageURL("receipt", "https://files.example.com/claims/4411/receipt.jpg"),
+		dn.ImageURL("claim_photo", "https://files.example.com/claims/4411/photo.jpg"),
+	},
+	Questions: dn.Questions{
+		dn.Q("matches", dn.Truth("Does the total on `receipt` match the amount in the claim?")),
+	},
+})
+```
 
 ### Videos
 
