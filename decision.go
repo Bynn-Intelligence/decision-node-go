@@ -47,8 +47,9 @@ type Usage struct {
 }
 
 // Answer is one answer of a Decision: a *TruthAnswer, a *ChoiceAnswer, a
-// *ScoreAnswer, a *NumberAnswer, or an *UnknownAnswer for a question type
-// this version of the package does not know.
+// *ScoreAnswer, a *NumberAnswer, a *PointAnswer, a *BoxAnswer, or an
+// *UnknownAnswer for a question type this version of the package does not
+// know.
 type Answer interface {
 	// Type is the answer's type as sent by the server: "truth", "choice", "score", ...
 	Type() string
@@ -113,6 +114,50 @@ type ScoreAnswer struct {
 	Legend map[int]any `json:"legend"`
 }
 
+// PointAnswer answers a point question: one spot in an image. Every number is
+// exactly as sent: whole pixels, or fractions of the width and height with
+// units "normalized".
+type PointAnswer struct {
+	answerBase
+	// X and Y are the spot, from the top-left corner of the image, X to the
+	// right and Y down.
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+	// Present is the probability that what the instructions describe is in
+	// the image at all. Under a low Present the spot is only the best guess.
+	Present float64 `json:"present"`
+	// Confidence is the probability that the spot lies on the thing, if it
+	// is there.
+	Confidence float64 `json:"confidence"`
+	// Image is the id of the image looked in; Width and Height its size in
+	// pixels.
+	Image  string  `json:"image"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
+// BoxAnswer answers a box question: a rectangle in an image. Every number is
+// exactly as sent, in the units of a PointAnswer.
+type BoxAnswer struct {
+	answerBase
+	// X1 and Y1 are the top-left corner, X2 and Y2 the bottom-right one.
+	X1 float64 `json:"x1"`
+	Y1 float64 `json:"y1"`
+	X2 float64 `json:"x2"`
+	Y2 float64 `json:"y2"`
+	// Present is the probability that what the instructions describe is in
+	// the image at all.
+	Present float64 `json:"present"`
+	// Confidence is the probability that the box overlaps the thing's true
+	// box by an intersection over union of 0.5 or more, if it is there.
+	Confidence float64 `json:"confidence"`
+	// Image is the id of the image looked in; Width and Height its size in
+	// pixels.
+	Image  string  `json:"image"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
 // UnknownAnswer holds an answer of a type this version of the package does
 // not know. Read its fields with Raw.
 type UnknownAnswer struct {
@@ -143,6 +188,18 @@ func (d *Decision) Score(id string) *ScoreAnswer {
 // Number returns the answer to the given question when it is a number answer, else nil.
 func (d *Decision) Number(id string) *NumberAnswer {
 	a, _ := d.Answers[id].(*NumberAnswer)
+	return a
+}
+
+// Point returns the answer to the given question when it is a point answer, else nil.
+func (d *Decision) Point(id string) *PointAnswer {
+	a, _ := d.Answers[id].(*PointAnswer)
+	return a
+}
+
+// Box returns the answer to the given question when it is a box answer, else nil.
+func (d *Decision) Box(id string) *BoxAnswer {
+	a, _ := d.Answers[id].(*BoxAnswer)
 	return a
 }
 
@@ -313,6 +370,18 @@ func parseAnswer(data json.RawMessage) Answer {
 	case "score":
 		a := &ScoreAnswer{answerBase: base}
 		if !hasFields(raw, "score", "confidence", "probabilities", "legend") || json.Unmarshal(data, a) != nil {
+			return unknown
+		}
+		return a
+	case "point":
+		a := &PointAnswer{answerBase: base}
+		if !hasFields(raw, "x", "y", "present", "confidence", "image", "width", "height") || json.Unmarshal(data, a) != nil {
+			return unknown
+		}
+		return a
+	case "box":
+		a := &BoxAnswer{answerBase: base}
+		if !hasFields(raw, "x1", "y1", "x2", "y2", "present", "confidence", "image", "width", "height") || json.Unmarshal(data, a) != nil {
 			return unknown
 		}
 		return a

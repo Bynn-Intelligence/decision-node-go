@@ -6,10 +6,11 @@ All notable changes to this package are listed here. The format follows
 
 ## [0.3.0] - Unreleased
 
-Implements version 1.2 of the DecisionNode SDK surface: sixteen images and videos as frames.
+Implements version 1.2 of the DecisionNode SDK surface: sixteen images, videos as frames, and the point and box question types.
 
 ### Added
 
+- Point and box questions: `Point`, `PointWith`, `Box` and `BoxWith` (`Question.Image` names the image to look in, `Question.Units` is `pixels` or `normalized`), and the answers `PointAnswer` (`X`, `Y`, `Present`, `Confidence`, `Image`, `Width`, `Height`) and `BoxAnswer` (`X1`, `Y1`, `X2`, `Y2` and the same), read with `Decision.Point` and `Decision.Box`. An answer with a field missing or of the wrong type is an `UnknownAnswer`. Their rules are checked locally with the API's 422 entries: an image in the request, `image` naming one of them (required with two or more), and the units; a point or box without instructions is the API's 400. `Systemone` refuses both types locally, like number questions.
 - Videos sent as the frames the caller sampled: `Video` (`ID`, `Frames`, and the optional `FPS`, `Start` and `End`), `VideoFrame` built with `VideoFrameData` (bytes, the media type taken from the first bytes when not given) and `VideoFrameBase64` (base64 text sent as given), and `Request.Videos`, which also takes a video in its JSON wire form. `Systemone`, the helper requests, `DecideMany`, batch requests and `CheckDecide` take videos as `Decide` does. Frames always go inline: they are never uploaded, cached, resized or re-encoded.
 - The API's video rules are checked before anything is sent, with the API's own message: at most 4 videos, an id that is present and unique across images and videos, at least one frame, frame times at least 0 and strictly increasing, a JPEG, PNG or WebP media type for every frame, `FPS` above 0 and at most 4, `Start` and `End` at least 0 and `End` after `Start`. The number of frames, their sizes and their pixels are left to the server.
 - `Usage.VideoFrames` and `Usage.VideoSeconds`, nil for a request without videos, and `Decision.Warnings`, the server's notes exactly as sent, empty when there are none.

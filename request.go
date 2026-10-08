@@ -79,10 +79,10 @@ func (qs Questions) MarshalJSON() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// Question is a question built by Truth, TruthWith, Choice, Score, Number or
-// NumberWith.
+// Question is a question built by Truth, TruthWith, Choice, Score, Number,
+// NumberWith, Point, PointWith, Box or BoxWith.
 type Question struct {
-	// Type is "truth", "choice", "score" or "number".
+	// Type is "truth", "choice", "score", "number", "point" or "box".
 	Type string
 	// Instructions says what to decide: a string or any JSON value. Nil leaves
 	// it out.
@@ -93,6 +93,10 @@ type Question struct {
 	// int, a float64, a json.Number). Nil leaves the field out, so the
 	// server's default applies: 0, 255 and 1.
 	Min, Max, Step any
+	// Image is the id of the image a point or box question looks in,
+	// required when the request has two or more images. Units is "pixels"
+	// (the server's default) or "normalized". "" leaves a field out.
+	Image, Units string
 
 	hasCriteria bool
 }
@@ -121,6 +125,14 @@ func (q Question) MarshalJSON() ([]byte, error) {
 		value any
 	}{{"min", q.Min}, {"max", q.Max}, {"step", q.Step}} {
 		if f.value != nil {
+			buf.WriteByte(',')
+			if err := writeMember(&buf, f.name, f.value); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, f := range []struct{ name, value string }{{"image", q.Image}, {"units", q.Units}} {
+		if f.value != "" {
 			buf.WriteByte(',')
 			if err := writeMember(&buf, f.name, f.value); err != nil {
 				return nil, err
@@ -187,6 +199,36 @@ func Number(instructions any) Question {
 // locally with a *ValidationError, before anything is sent.
 func NumberWith(instructions, min, max, step any) Question {
 	return Question{Type: "number", Instructions: instructions, Min: min, Max: max, Step: step}
+}
+
+// Point builds a point question: one spot in an image, its x and y, with the
+// probability that what the instructions describe is there at all
+// (present) and that the spot lies on it (confidence). The request needs an
+// image; with two or more, name the one to look in with PointWith.
+func Point(instructions any) Question {
+	return Question{Type: "point", Instructions: instructions}
+}
+
+// PointWith builds a point question that looks in the image with this id
+// (required when the request has two or more images) and answers in units,
+// "pixels" (the default) or "normalized" (fractions of the width and height).
+// "" leaves either out.
+func PointWith(instructions any, image, units string) Question {
+	return Question{Type: "point", Instructions: instructions, Image: image, Units: units}
+}
+
+// Box builds a box question: a rectangle in an image, its top-left (x1, y1)
+// and bottom-right (x2, y2) corners, with present and confidence as a point
+// has. The request needs an image; with two or more, name the one to look in
+// with BoxWith.
+func Box(instructions any) Question {
+	return Question{Type: "box", Instructions: instructions}
+}
+
+// BoxWith builds a box question that looks in the image with this id and
+// answers in units, like PointWith.
+func BoxWith(instructions any, image, units string) Question {
+	return Question{Type: "box", Instructions: instructions, Image: image, Units: units}
 }
 
 // Options is an ordered set of choice options, sent in this order.

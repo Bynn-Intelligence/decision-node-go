@@ -2,7 +2,7 @@
 
 The Go client for the [DecisionNode](https://decisionnode.com) API: ask structured questions about any state and get calibrated numbers back.
 
-- Four question types: `truth` (how likely a statement is true), `choice` (one option of a set), `score` (a place on an ordered scale) and `number` (a value on a grid you define).
+- Six question types: `truth` (how likely a statement is true), `choice` (one option of a set), `score` (a place on an ordered scale), `number` (a value on a grid you define), `point` (a spot in an image) and `box` (a rectangle in an image).
 - Decisions one at a time, many at once, as a live session over a WebSocket, or as a batch at half the price.
 - Up to 16 images by URL, from files or from bytes, checked locally and uploaded only when that is faster.
 - Videos sent as the frames you sampled, each with its time.
@@ -74,6 +74,8 @@ There are no thresholds in the API: what 0.94 means is your code's decision.
 | `dn.Score(instructions, levels)` | Where on this scale, low to high? | `*ScoreAnswer`: `Score`, `Confidence`, `Probabilities` and `Legend` by level index |
 | `dn.Number(instructions)` | Which value of 0 to 255? | `*NumberAnswer`: `Number`, `Expected`, `Confidence`, `Probabilities` by value |
 | `dn.NumberWith(instructions, min, max, step)` | Which value of the grid `min`, `min+step`, ... up to `max`? (`nil` leaves a bound to its default: 0, 255, 1) | `*NumberAnswer` |
+| `dn.Point(instructions)`, `dn.PointWith(instructions, image, units)` | Where in the image is it? | `*PointAnswer`: `X`, `Y`, `Present`, `Confidence`, `Image`, `Width`, `Height` |
+| `dn.Box(instructions)`, `dn.BoxWith(instructions, image, units)` | Which rectangle of the image holds it? | `*BoxAnswer`: `X1`, `Y1`, `X2`, `Y2`, `Present`, `Confidence`, `Image`, `Width`, `Height` |
 
 `options` is `dn.Options` (ordered names with descriptions), a `map[string]string` of name to description, or a `[]string` of names. `levels` is a slice of levels, 1 to 10. A number grid holds at most 4,096 values; `min` and `step` take up to 6 decimals, and a `json.Number` keeps a decimal exact. `NumberAnswer.Probabilities` is keyed by each value exactly as the server wrote it (`"7"`, `"3.5"`) and lists the values above 0.001.
 
@@ -88,13 +90,31 @@ d, err := client.Decide(ctx, dn.Request{
 fmt.Println(d.Number("cars").Number, d.Number("cars").Expected) // 7 7.0
 ```
 
+A point or a box is a place in one of the request's images:
+
+```go
+d, err := client.Decide(ctx, dn.Request{
+	Images: []dn.Image{dn.ImageURL("belt", "https://files.example.com/line-3/cam-2/0917.jpg")},
+	Questions: dn.Questions{
+		dn.Q("pick", dn.Point("Point to the yellow package closest to the robot arm.")),
+		dn.Q("damage", dn.BoxWith("Draw a box around the damaged package.", "belt", "")),
+		dn.Q("any_damage", dn.Truth("Is any package on the belt damaged?")),
+	},
+})
+p, b := d.Point("pick"), d.Box("damage")
+fmt.Println(p.X, p.Y, p.Present)           // 812 455 0.97
+fmt.Println(b.X1, b.Y1, b.X2, b.Y2, b.Image) // 300 120 520 410 belt
+```
+
+`X` and `Y` are measured from the top-left corner of the image, `X` to the right and `Y` down; a box runs from its top-left corner (`X1`, `Y1`) to its bottom-right corner (`X2`, `Y2`). `units` is `"pixels"` (the default: whole pixels of the image as sent) or `"normalized"` (fractions of the width and the height). `Present` is the probability that what the instructions describe is in the image at all; `Confidence` the probability that the place is right if it is. `Image`, `Width` and `Height` name the image looked in and its size in pixels. The request needs an image, and `image` names the one to look in when it carries two or more (`""` leaves it out). `Systemone` takes neither type.
+
 `State`, instructions, descriptions and levels take a string or any value that encodes to JSON: a struct, a map, a slice or a `json.RawMessage`. A question in its JSON wire form, such as a `map[string]any`, works wherever a builder does:
 
 ```go
 dn.Q("escalate", map[string]any{"type": "truth", "instructions": "Escalate to a human now?"})
 ```
 
-Question ids are any string, and answers come back under the same id. Read them with `d.Truth(id)`, `d.Choice(id)`, `d.Score(id)` and `d.Number(id)` (nil when the answer is of another type), or `d.Answer(id)` for the `dn.Answer` interface. An answer of a type this version does not know yet is an `*UnknownAnswer` holding the raw fields. So is an answer of a known type whose fields are missing or of the wrong type: the decision itself does not fail.
+Question ids are any string, and answers come back under the same id. Read them with `d.Truth(id)`, `d.Choice(id)`, `d.Score(id)`, `d.Number(id)`, `d.Point(id)` and `d.Box(id)` (nil when the answer is of another type), or `d.Answer(id)` for the `dn.Answer` interface. An answer of a type this version does not know yet is an `*UnknownAnswer` holding the raw fields. So is an answer of a known type whose fields are missing or of the wrong type: the decision itself does not fail.
 
 Numbers are passed through exactly as received: a probability list may read 0.8200000000000001 or sum to 0.99.
 
@@ -326,8 +346,8 @@ The server never sees a request the client could have refused. Every fixed rule 
 | Fault | Returned as |
 |---|---|
 | more than 128 objects and arrays inside each other; an unknown question type (a number question on `Systemone` included) | `*BadRequestError`, `ErrorType` `api_usage_error`, "Invalid request." |
-| a question that is not an object or has no type; instructions, a state, an option description, a level or a truth side that is not a string, an object or an array; a choice or score without criteria, of the wrong shape, or a score with no level; a number grid that cannot be built (a bound not a number, beyond 2^53, more than 6 decimals, `step` not above 0, `min` above `max`, more than 4,096 values); a session `Window` or `TTLSeconds` out of range | `*ValidationError` with the API's entries, empty `ErrorType` |
-| a choice with no option or more than 255, a score over 10 levels, a truth without instructions or criteria, a number without instructions | `*BadRequestError` with the API's message and an empty `ErrorType` |
+| a question that is not an object or has no type; instructions, a state, an option description, a level or a truth side that is not a string, an object or an array; a choice or score without criteria, of the wrong shape, or a score with no level; a number grid that cannot be built (a bound not a number, beyond 2^53, more than 6 decimals, `step` not above 0, `min` above `max`, more than 4,096 values); a point or box in a request without images, without `image` among two or more images, or naming no image of the request, or with `units` other than `pixels` and `normalized`; a session `Window` or `TTLSeconds` out of range | `*ValidationError` with the API's entries, empty `ErrorType` |
+| a choice with no option or more than 255, a score over 10 levels, a truth without instructions or criteria, a number, point or box without instructions | `*BadRequestError` with the API's message and an empty `ErrorType` |
 | an image over its limits, more than 16, an empty or repeated id, a URL that is not `https` | `*BadRequestError`, `api_usage_error` |
 | more than 4 videos; a video without an id or with an id already used by an image or a video; a video without frames; a frame time that is negative or not after the one before it; a frame that is not JPEG, PNG or WebP by its media type; `FPS` not above 0 and at most 4; `Start` or `End` negative; `End` not after `Start` | `*BadRequestError`, `api_usage_error` |
 | an `https` image URL over 2,048 characters, with user information, on a port other than 443, or naming a private address | `*BadRequestError`, `image_url_refused` |
@@ -369,7 +389,7 @@ An option wins over the environment, and the environment over the default. The b
 DECISIONNODE_CONFORMANCE_DIR=/path/to/decision-node-conformance go test ./...
 ```
 
-The conformance tests run every case of the DecisionNode conformance suite against its mock server, and need `python3` for that server. `DECISIONNODE_CONFORMANCE_DIR` must point at a checkout of the suite: when it is unset the conformance test fails, it is never skipped. To run only the unit tests, pass `-skip TestConformance`. This version passes conformance suite 1.7; CI checks the suite out at the commit named once, in `CONFORMANCE_REF` in `.github/workflows/ci.yml`, with every action pinned to a commit and no credentials left in the checkouts.
+The conformance tests run every case of the DecisionNode conformance suite against its mock server, and need `python3` for that server. `DECISIONNODE_CONFORMANCE_DIR` must point at a checkout of the suite: when it is unset the conformance test fails, it is never skipped. To run only the unit tests, pass `-skip TestConformance`. This version passes conformance suite 1.8; CI checks the suite out at the commit named once, in `CONFORMANCE_REF` in `.github/workflows/ci.yml`, with every action pinned to a commit and no credentials left in the checkouts.
 
 ## License
 

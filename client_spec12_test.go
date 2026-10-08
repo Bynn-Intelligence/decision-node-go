@@ -222,3 +222,102 @@ func b64(b []byte) string {
 	out, _ := json.Marshal(b)
 	return strings.Trim(string(out), `"`)
 }
+
+func TestPointAndBoxWireFormsAndAnswers(t *testing.T) {
+	srv, rec := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		respond(w, 200, `{"model":"decisionnode-1.0","answers":{
+			"pick":{"type":"point","x":812,"y":455,"present":0.97,"confidence":0.91,"image":"belt","width":1920,"height":1080},
+			"damage":{"type":"box","x1":0.1563,"y1":0.1111,"x2":0.2708,"y2":0.3796,"present":0.95,"confidence":0.88,"image":"belt","width":1920,"height":1080},
+			"odd":{"type":"point","x":true,"y":455,"present":0.97,"confidence":0.91,"image":"belt","width":1920,"height":1080}}}`, nil)
+	})
+	d, err := client(t, srv.URL).Decide(context.Background(), dn.Request{
+		Images: []dn.Image{dn.ImageURL("belt", "https://files.example.com/line-3/cam-2/0917.jpg")},
+		Questions: dn.Questions{
+			dn.Q("pick", dn.Point("Point to the yellow package closest to the robot arm.")),
+			dn.Q("damage", dn.BoxWith("Draw a box around the damaged package.", "belt", "normalized")),
+			dn.Q("odd", map[string]any{"type": "point", "instructions": "?"}),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(rec.bodies[0])
+	for _, want := range []string{
+		`"pick":{"type":"point","instructions":"Point to the yellow package closest to the robot arm."}`,
+		`"damage":{"type":"box","instructions":"Draw a box around the damaged package.","image":"belt","units":"normalized"}`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("want %s in %s", want, body)
+		}
+	}
+	p, b := d.Point("pick"), d.Box("damage")
+	if p == nil || p.X != 812 || p.Y != 455 || p.Present != 0.97 || p.Confidence != 0.91 || p.Image != "belt" || p.Width != 1920 || p.Height != 1080 {
+		t.Fatalf("point: %+v", p)
+	}
+	if b == nil || b.X1 != 0.1563 || b.Y2 != 0.3796 || b.Image != "belt" {
+		t.Fatalf("box: %+v", b)
+	}
+	if _, ok := d.Answer("odd").(*dn.UnknownAnswer); !ok {
+		t.Fatalf("a boolean coordinate: %T", d.Answer("odd"))
+	}
+}
+
+func TestPointAndBoxLocalChecks(t *testing.T) {
+	c := dn.NewClient(dn.WithAPIKey("dn_test"))
+	belt := dn.ImageURL("belt", "https://files.example.com/belt.jpg")
+	dock := dn.ImageURL("dock", "https://files.example.com/dock.jpg")
+	entries := func(req dn.Request) []any {
+		t.Helper()
+		var v *dn.ValidationError
+		if err := c.CheckDecide(req); !errors.As(err, &v) || v.Status != 0 {
+			t.Fatalf("got %v", err)
+		}
+		return v.Entries
+	}
+	types := func(es []any) string {
+		var out []string
+		for _, e := range es {
+			m := e.(map[string]any)
+			loc := fmt.Sprint(m["loc"])
+			out = append(out, m["type"].(string)+" "+loc)
+		}
+		return strings.Join(out, "; ")
+	}
+	got := types(entries(dn.Request{Questions: dn.Questions{dn.Q("pick", dn.Point("Where?"))}}))
+	if got != "image_required [body questions pick point]" {
+		t.Error(got)
+	}
+	got = types(entries(dn.Request{
+		Images: []dn.Image{belt, dock},
+		Videos: []any{dn.Video{ID: "cam", Frames: []dn.VideoFrame{dn.VideoFrameBase64(0, "AA==", "image/png")}}},
+		Questions: dn.Questions{
+			dn.Q("pick", dn.PointWith("Where?", "cam", "inches")),
+			dn.Q("any", dn.Truth("Damaged?")),
+			dn.Q("damage", dn.Box("Where?")),
+			dn.Q("raw", map[string]any{"type": "box", "instructions": "?", "image": 7}),
+		},
+	}))
+	want := "unknown_image [body questions pick point image]; literal_error [body questions pick point units]; " +
+		"missing [body questions damage box image]; string_type [body questions raw box image]"
+	if got != want {
+		t.Errorf("got %s\nwant %s", got, want)
+	}
+	// One image needs no image field; the instructions are the plain 400.
+	if err := c.CheckDecide(dn.Request{Images: []dn.Image{belt}, Questions: dn.Questions{dn.Q("pick", dn.Point("Where?"))}}); err != nil {
+		t.Fatal(err)
+	}
+	var bad *dn.BadRequestError
+	err := c.CheckDecide(dn.Request{Images: []dn.Image{belt}, Questions: dn.Questions{dn.Q("pick", dn.Box(nil))}})
+	if !errors.As(err, &bad) || bad.Error() != "Box question must have instructions: pick" || bad.ErrorType != "" {
+		t.Fatalf("no instructions: %v", err)
+	}
+	// The strict path takes neither type.
+	err = c.CheckSystemone(dn.Request{Images: []dn.Image{belt}, Questions: dn.Questions{dn.Q("pick", dn.Point("Where?"))}})
+	if !errors.As(err, &bad) || bad.Error() != "Invalid request." || bad.ErrorType != "api_usage_error" {
+		t.Fatalf("systemone: %v", err)
+	}
+	// A session's images come with its frames: no image rule at open.
+	if err := c.CheckSession(dn.SessionRequest{Questions: dn.Questions{dn.Q("pick", dn.Point("Where?"))}}); err != nil {
+		t.Fatal(err)
+	}
+}

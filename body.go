@@ -64,7 +64,11 @@ func (c *Client) prepare(req Request, systemone bool, customID *string) (*prepar
 		state = ""
 	}
 	lim := c.limitsFor(model)
-	var qc questionCheck
+	// A point or box question looks in one of the request's images.
+	qc := questionCheck{places: true, imageIDs: make([]string, len(req.Images))}
+	for i, img := range req.Images {
+		qc.imageIDs[i] = img.id
+	}
 	stateJSON, err := marshal(state)
 	if err != nil {
 		return nil, encodeError(err)

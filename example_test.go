@@ -264,3 +264,21 @@ func ExampleVideo() {
 	}
 	fmt.Println(d.Truth("fall").Truth, d.Number("forklifts").Number, d.Warnings)
 }
+
+func ExamplePoint() {
+	client := dn.NewClient()
+	d, err := client.Decide(context.Background(), dn.Request{
+		Images: []dn.Image{dn.ImageURL("belt", "https://files.example.com/line-3/cam-2/0917.jpg")},
+		Questions: dn.Questions{
+			dn.Q("pick", dn.Point("Point to the yellow package closest to the robot arm.")),
+			dn.Q("damage", dn.BoxWith("Draw a box around the damaged package.", "belt", "")),
+			dn.Q("any_damage", dn.Truth("Is any package on the belt damaged?")),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	p, b := d.Point("pick"), d.Box("damage")
+	fmt.Println(p.X, p.Y, p.Present)
+	fmt.Println(b.X1, b.Y1, b.X2, b.Y2, b.Image)
+}

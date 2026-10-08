@@ -38,6 +38,10 @@ type questionCheck struct {
 	entries  []any
 	reason   string
 	deferred error
+	// imageIDs are the request's image ids, for the point and box rules,
+	// when places is set; a session's questions are checked without them.
+	imageIDs []string
+	places   bool
 }
 
 func (qc *questionCheck) entry(kind string, loc []any, msg string, input any, ctx map[string]any, reason string) {
@@ -191,8 +195,54 @@ func (qc *questionCheck) question(id string, raw []byte, systemone bool, lim lim
 			most = lim.maxGridValues
 		}
 		qc.number(id, q.asMap(), raw, loc, most)
+	case "point", "box":
+		qc.place(id, typ, q, raw, loc)
 	}
 	return typ
+}
+
+// unitsOK are the units a point or box answers in.
+var unitsOK = map[string]bool{"pixels": true, "normalized": true}
+
+// place checks a point or box question: its image among the request's
+// (422 entries), its units (a 422 entry), then its instructions (the plain
+// 400).
+func (qc *questionCheck) place(id, typ string, q members, raw []byte, loc []any) {
+	at := func(field string) []any { return append(append([]any(nil), loc...), field) }
+	if qc.places {
+		image := q.get("image")
+		var name string
+		trimmed := bytes.TrimSpace(image)
+		isString := len(trimmed) > 0 && trimmed[0] == '"' && json.Unmarshal(trimmed, &name) == nil
+		switch {
+		case len(qc.imageIDs) == 0:
+			qc.entry("image_required", loc, fmt.Sprintf("A %s question needs an image in the request", typ), json.RawMessage(raw), nil,
+				fmt.Sprintf("question '%s': a %s question needs an image in the request", id, typ))
+		case isNull(image):
+			if len(qc.imageIDs) >= 2 {
+				qc.entry("missing", at("image"), "Field required", json.RawMessage(raw), nil,
+					fmt.Sprintf("question '%s': image: Field required with %d images", id, len(qc.imageIDs)))
+			}
+		case !isString:
+			qc.entry("string_type", at("image"), "Input should be a valid string", json.RawMessage(image), nil,
+				fmt.Sprintf("question '%s': image must be a string", id))
+		case !containsString(qc.imageIDs, name):
+			qc.entry("unknown_image", at("image"), "Input should be the id of an image of the request", json.RawMessage(image), nil,
+				fmt.Sprintf("question '%s': image %s is not an image of the request", id, compactJSON(image)))
+		}
+	}
+	if units := q.get("units"); !isNull(units) {
+		var u string
+		if json.Unmarshal(units, &u) != nil || !unitsOK[u] {
+			qc.entry("literal_error", at("units"), "Input should be 'pixels' or 'normalized'", json.RawMessage(units),
+				map[string]any{"expected": "'pixels' or 'normalized'"}, fmt.Sprintf("question '%s': units must be pixels or normalized", id))
+		}
+	}
+	if isNull(q.get("instructions")) {
+		name := strings.ToUpper(typ[:1]) + typ[1:]
+		qc.refuse(localBadRequest("", fmt.Sprintf("%s question must have instructions: %s", name, id),
+			fmt.Sprintf("question '%s': a %s question needs instructions", id, typ)))
+	}
 }
 
 // sdl adds the three entries the API gives a value that must be a string,
@@ -211,14 +261,14 @@ func knownType(typ string, systemone bool) bool {
 	if systemone {
 		return typ == "noul" || typ == "choice" || typ == "score"
 	}
-	return typ == "truth" || typ == "noul" || typ == "choice" || typ == "score" || typ == "number"
+	return typ == "truth" || typ == "noul" || typ == "choice" || typ == "score" || typ == "number" || typ == "point" || typ == "box"
 }
 
 func typeList(systemone bool) string {
 	if systemone {
 		return "noul, choice and score on /v1/systemone"
 	}
-	return "truth, noul, choice, score and number"
+	return "truth, noul, choice, score, number, point and box"
 }
 
 // isSDL reports a JSON string, object or array.

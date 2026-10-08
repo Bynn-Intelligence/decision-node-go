@@ -426,6 +426,12 @@ func normAnswer(a dn.Answer) any {
 		return map[string]any{"kind": "choice", "choice": x.Choice, "confidence": x.Confidence, "probabilities": x.Probabilities}
 	case *dn.NumberAnswer:
 		return map[string]any{"kind": "number", "number": x.Number, "expected": x.Expected, "confidence": x.Confidence, "probabilities": x.Probabilities}
+	case *dn.PointAnswer:
+		return map[string]any{"kind": "point", "x": x.X, "y": x.Y, "present": x.Present, "confidence": x.Confidence,
+			"image": x.Image, "width": x.Width, "height": x.Height}
+	case *dn.BoxAnswer:
+		return map[string]any{"kind": "box", "x1": x.X1, "y1": x.Y1, "x2": x.X2, "y2": x.Y2, "present": x.Present,
+			"confidence": x.Confidence, "image": x.Image, "width": x.Width, "height": x.Height}
 	case *dn.ScoreAnswer:
 		probs := map[string]any{}
 		for k, v := range x.Probabilities {
@@ -677,6 +683,10 @@ func decodeQuestion(v any) any {
 			return dn.Score(argValue(args, "instructions"), argValue(args, "levels"))
 		case "$number":
 			return dn.NumberWith(argValue(args, "instructions"), argValue(args, "min"), argValue(args, "max"), argValue(args, "step"))
+		case "$point":
+			return dn.PointWith(argValue(args, "instructions"), str(args.vals["image"]), str(args.vals["units"]))
+		case "$box":
+			return dn.BoxWith(argValue(args, "instructions"), str(args.vals["image"]), str(args.vals["units"]))
 		}
 	}
 	return raw(v)
