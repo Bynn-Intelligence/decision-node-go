@@ -106,7 +106,7 @@ fmt.Println(p.X, p.Y, p.Present)           // 812 455 0.97
 fmt.Println(b.X1, b.Y1, b.X2, b.Y2, b.Image) // 300 120 520 410 belt
 ```
 
-`X` and `Y` are measured from the top-left corner of the image, `X` to the right and `Y` down; a box runs from its top-left corner (`X1`, `Y1`) to its bottom-right corner (`X2`, `Y2`). `units` is `"pixels"` (the default: whole pixels of the image as sent) or `"normalized"` (fractions of the width and the height). `Present` is the probability that what the instructions describe is in the image at all; `Confidence` the probability that the place is right if it is. `Image`, `Width` and `Height` name the image looked in and its size in pixels. The request needs an image, and `image` names the one to look in when it carries two or more (`""` leaves it out).
+`X` and `Y` are measured from the top-left corner of the image, `X` to the right and `Y` down; a box runs from its top-left corner (`X1`, `Y1`) to its bottom-right corner (`X2`, `Y2`). `units` is `"pixels"` (the default: whole pixels of the image as sent) or `"normalized"` (fractions of the width and the height). `Present` is the probability that what the instructions describe is in the image at all; `Confidence` the probability that the place is right if it is. `Image`, `Width` and `Height` name the image looked in and its size in pixels. The request needs an image, and `image` names the one to look in by its id when it carries two or more (`""` leaves it out); a reference by number ("Picture 2") goes in the instructions.
 
 `State`, instructions, descriptions and levels take a string or any value that encodes to JSON: a struct, a map, a slice or a `json.RawMessage`. A question in its JSON wire form, such as a `map[string]any`, works wherever a builder does:
 
@@ -168,6 +168,20 @@ d, err := client.Decide(ctx, dn.Request{
 | `dn.ImageBase64(id, text, mediaType)` | Bytes given as base64 text (a `data:` prefix is accepted). |
 | `dn.ImageReader(id, r, mediaType)` | The bytes read from an `io.Reader`, read when the `Image` is made. |
 | `dn.ImageUpload(id, uploadID, mediaType)` | An upload made earlier (`client.Upload`), less than an hour old. |
+
+The model sees each image as "Picture 1", "Picture 2", ... with its id beside it, numbered from 1 in the order of `Images`, and each video as "Video 1", "Video 2", ... in the order of `Videos`, numbered separately. Text in the state, the instructions or a criterion can refer to an image by position ("Picture 2", "image 2", "the second image", "the last image") or by its id ("the receipt", "`receipt`"), and to a video the same way ("Video 1" or its id):
+
+```go
+d, err := client.Decide(ctx, dn.Request{
+	Images: []dn.Image{
+		dn.ImageURL("receipt", "https://files.example.com/claims/4411/receipt.jpg"),
+		dn.ImageURL("statement", "https://files.example.com/claims/4411/statement.png"),
+	},
+	Questions: dn.Questions{
+		dn.Q("charged", dn.Truth("Does the total in Picture 1 match the charge on the statement?")),
+	},
+})
+```
 
 Every image is checked before anything is sent: at most 16 a request (URLs included; a 17th is the API's `*ValidationError` with a `too_long` entry), ids present and unique, local bytes JPEG, PNG or WebP by their first bytes (and matching a given media type), at most 10 MB, at most 40 megapixels read from the image header. Any other failure is the API's own `*BadRequestError` with no status, and nothing is sent. `Upload` takes up to 16 images a call. No image is resized or re-encoded.
 

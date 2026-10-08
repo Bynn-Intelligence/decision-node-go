@@ -31,8 +31,9 @@ const (
 // in Request.Videos.
 type Video struct {
 	// ID names the video: a non-empty string, unique across the request's
-	// images and videos. Text in the state or the instructions can refer to
-	// the video by it.
+	// images and videos. The model sees the video as "Video <n>" (its place
+	// in the request's videos, from 1) with this id beside it, so text in the
+	// state or the instructions can refer to it by either.
 	ID string
 	// Frames are the video's frames, at least one, their times strictly
 	// increasing. Build each with VideoFrameData or VideoFrameBase64.

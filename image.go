@@ -162,7 +162,10 @@ func ImageUpload(id, uploadID, mediaType string) Image {
 	return Image{id: id, uploadID: uploadID, mediaType: mediaType}
 }
 
-// ID returns the image's id.
+// ID returns the image's id, unique within a request. The model sees the
+// image as "Picture <n>" (its place in the request's images, from 1) with
+// this id beside it, so text in the state or the instructions can refer to it
+// by either.
 func (img Image) ID() string { return img.id }
 
 // MediaType returns the declared media type, else the one found in the

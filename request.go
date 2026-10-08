@@ -17,7 +17,9 @@ type Request struct {
 	// Questions holds the questions, by id, in the order they are sent.
 	Questions Questions
 	// Images are sent beside the state, up to 16. Every question sees every
-	// image.
+	// image. The model sees each image as "Picture <n>" (its place in Images,
+	// from 1) with its id beside it, so text in the state or the instructions
+	// can refer to it by either.
 	Images []Image
 	// Videos are sent beside the state and the images, up to 4, each as the
 	// frames the caller sampled: a Video, or a video in its JSON wire form
@@ -93,8 +95,9 @@ type Question struct {
 	// int, a float64, a json.Number). Nil leaves the field out, so the
 	// server's default applies: 0, 255 and 1.
 	Min, Max, Step any
-	// Image is the id of the image a point or box question looks in,
-	// required when the request has two or more images. Units is "pixels"
+	// Image is the id of the image a point or box question looks in (a
+	// string), required when the request has two or more images. A reference
+	// by number ("Picture 2") goes in the instructions. Units is "pixels"
 	// (the server's default) or "normalized". "" leaves a field out.
 	Image, Units string
 
@@ -210,9 +213,10 @@ func Point(instructions any) Question {
 }
 
 // PointWith builds a point question that looks in the image with this id
-// (required when the request has two or more images) and answers in units,
-// "pixels" (the default) or "normalized" (fractions of the width and height).
-// "" leaves either out.
+// (required when the request has two or more images; a reference by number,
+// "Picture 2", goes in the instructions) and answers in units, "pixels" (the
+// default) or "normalized" (fractions of the width and height). "" leaves
+// either out.
 func PointWith(instructions any, image, units string) Question {
 	return Question{Type: "point", Instructions: instructions, Image: image, Units: units}
 }
