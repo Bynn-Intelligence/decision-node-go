@@ -17,11 +17,18 @@ Implements version 1.1 of the DecisionNode SDK surface: every public call.
 - The Batch API: `Client.Batches` with `Create`, `Add` (split at 10 MiB), `Finalize`, `Get`, `List`, `Results` and `Cancel`, and `Client.RunBatch`.
 - `SessionLimitError`, a `RateLimitError` that is never retried.
 - `ModelInfo` typed fields for the number, upload, session and batch limits.
+- `Client.EndSession` ends a session by its id, sent once.
+- `RawJSON` on `Reply`, `FrameError` and `SessionClosed`: the message exactly as sent.
+- `UploadResult` (`ID`, `ExpiresAt`), returned by `Client.Upload`.
+- `Ptr`, for the optional fields where 0 or "" differs from not given.
+- Every fixed rule the API documents is checked locally, in the server's order, with the error type the server sends: question shapes and types, value types, number grids, nesting, image URLs (`image_url_refused`), session window and lifetime, frames (`Session.Send` writes nothing and uses no seq for a refused frame), batch custom ids and list paging, and, after `Models`, the limits only that list states.
+- An upload refused 403 after its URL's lifetime is presigned again once.
 - The API's fixed limits as constants: `MaxImages`, `MaxImageBytes`, `MaxImagePixels`, `MaxImageURLChars`, `MaxChoiceOptions`, `MaxScoreLevels`, `MaxNumberGridValues`, `MinPollInterval`, `DefaultPollInterval`, `DefaultBatchTimeout`.
 
 ### Changed
 
 - `SpecVersion` is `"1.1"`.
+- `SessionRequest.Window` and `TTLSeconds`, `BatchRequest.CustomID` and `BatchListOptions.Offset` and `Limit` are pointers, so an explicit 0 or "" is sent and checked rather than taken as not given.
 - Every request is checked locally before anything is sent. A fault in its content (an image's format, size or pixel count, too many images or options or levels, a truth without text, a number grid the API would refuse) is the API's own `*BadRequestError` or `*ValidationError`, with no status and no request id. Image bytes of an unknown format were an argument error before; `ImageFile` no longer refuses a readable file of another format, the call does.
 - An answer of wire type `noul` is read into a `TruthAnswer`.
 - The default transport keeps more idle connections, uses larger buffers, prefers HTTP/2 and resumes TLS sessions.

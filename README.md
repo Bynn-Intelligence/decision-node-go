@@ -109,7 +109,8 @@ Numbers are passed through exactly as received: a probability list may read 0.82
 | `Number(ctx, dn.NumberRequest)` | One number question, with the id `number`. Returns a `*NumberAnswer`. |
 | `Gate(ctx, dn.GateRequest)` | Judges an action before it runs: `risk` (score), `touches_production` (truth) and `verdict` (allow, confirm or block). |
 | `Systemone(ctx, dn.Request)` | One request to `POST /v1/systemone`, the strict path for truth, choice and score questions. Returns a `*Decision` read like `Decide`'s. |
-| `Upload(ctx, images)` | Uploads local images whatever their size and returns their upload ids, to name them later with `dn.ImageUpload`. |
+| `Upload(ctx, images)` | Uploads local images whatever their size and returns a `dn.UploadResult` for each (`ID`, `ExpiresAt`), to name them later with `dn.ImageUpload`. |
+| `EndSession(ctx, id)` | Ends a session by its id, sent once and never retried; an already ended session is success with a nil summary. |
 | `OpenSession(ctx, dn.SessionRequest)` | Opens a session. Returns a `*Session`; see [Sessions](#sessions). |
 | `Supervise(ctx, body, feed, onEvent)` | Keeps a feed of frames answered across sessions, reopening as needed. |
 | `Batches()` | The Batch API: `Create`, `Add`, `Finalize`, `Get`, `List`, `Results`, `Cancel`; see [Batches](#batches). |
@@ -200,10 +201,10 @@ for ev := range s.Replies() {
 
 | Call | Does |
 |---|---|
-| `OpenSession(ctx, dn.SessionRequest)` | `State`, `Questions`, `Instructions`, `Model`, `Window` (frames each answer sees, 1 to 64) and `TTLSeconds` (1 to 3,600); 0 leaves a number to the server. Returns a `*Session` with every field of the server's answer, the questions already answered on the fixed part. A key at its limit of open sessions gets a `*SessionLimitError` (also a `*RateLimitError`), never retried. |
+| `OpenSession(ctx, dn.SessionRequest)` | `State`, `Questions`, `Instructions`, `Model`, `Window` (frames each answer sees, 1 to 64) and `TTLSeconds` (1 to 3,600), set with `dn.Ptr(16)`; nil leaves a number to the server. Returns a `*Session` with every field of the server's answer, the questions already answered on the fixed part. A key at its limit of open sessions gets a `*SessionLimitError` (also a `*RateLimitError`), never retried. |
 | `s.Connect(ctx)` | Opens the socket. The key travels in the handshake's `Authorization` header, never in the URL. |
-| `s.Send(ctx, dn.Frame)` | Sends one frame (`Frame`, `Image`, `Questions`, `Reset`, `Seq`) and returns its `seq`, counted from 1 unless given. It never waits for the reply. A frame's image follows the same rules as a request's, except that a URL is refused. |
-| `s.Next(ctx)`, `s.Replies()` | The events: `*dn.Reply`, `*dn.FrameError` (a value, never an error: the session goes on), and last `*dn.SessionClosed`. Pings are answered for you. |
+| `s.Send(ctx, dn.Frame)` | Sends one frame (`Frame`, `Image`, `Questions`, `Reset`, `Seq`) and returns its `seq`, counted from 1 unless given. It never waits for the reply. A frame the server would refuse for its form (no frame value or image, an empty frame, an unknown question id, a `seq` out of range, an image by URL or over the image rules) returns a `*BadRequestError` with nothing written and no `seq` used. |
+| `s.Next(ctx)`, `s.Replies()` | The events: `*dn.Reply`, `*dn.FrameError` (a value, never an error: the session goes on), and last `*dn.SessionClosed`. Each carries `RawJSON`, the message exactly as the server sent it (a close, which has no JSON, as `{"code", "reason", "reopen"}`). Pings are answered for you. |
 | `s.End(ctx)` | Ends the session. A session already ended is success. |
 | `s.Close()` | Closes the socket from your side. |
 
@@ -215,12 +216,12 @@ The Batch API answers many decide requests asynchronously, within 24 hours, at h
 
 ```go
 batch, results, err := client.RunBatch(ctx, []dn.BatchRequest{
-	{CustomID: "ticket-1", Request: dn.Request{State: "I was charged twice.", Questions: questions}},
-	{CustomID: "ticket-2", Request: dn.Request{State: "The app crashes on start.", Questions: questions}},
+	{CustomID: dn.Ptr("ticket-1"), Request: dn.Request{State: "I was charged twice.", Questions: questions}},
+	{CustomID: dn.Ptr("ticket-2"), Request: dn.Request{State: "The app crashes on start.", Questions: questions}},
 }, dn.RunBatchOptions{PollInterval: time.Minute})
 for _, r := range results {
 	if r.Decision != nil {
-		fmt.Println(r.CustomID, r.Decision.Choice("route").Choice)
+		fmt.Println(r.CustomID, r.Decision.Choice("route").Choice) // CustomID is a string here
 	} else {
 		fmt.Println(r.CustomID, r.Status, r.StatusText, r.Err) // a value, never returned
 	}
@@ -235,11 +236,11 @@ It checks every request locally, creates an empty draft, adds the lines in calls
 | `Add(ctx, batchID, requests)` | Adds lines to a draft, split into calls of at most 10 MiB, in order. |
 | `Finalize(ctx, batchID)` | Queues the draft. |
 | `Get(ctx, batchID)` | The `*Batch`: `State`, `Counters`, the times, `Usage`, `Error`. |
-| `List(ctx, dn.BatchListOptions)` | One page of your batches, newest first. |
+| `List(ctx, dn.BatchListOptions)` | One page of your batches, newest first. `Offset` (0 or more) and `Limit` (1 to 100) are pointers; nil leaves them to the server. |
 | `Results(ctx, batchID)` | One `BatchResult` per line, in upload order: `Decision` for a 200 line, else `Err`, the error that status would give. |
 | `Cancel(ctx, batchID)` | Cancels the batch. Safe to repeat. |
 
-Each line carries its custom id, a model (the request's, else the client's) and a state. A line's local images follow the inline threshold per line. `Create`, `Add` and `Finalize` are retried only on 429 and 529, since a repeat after a lost answer could create a second draft; a `Finalize` answered 409 reads the batch and returns it when an earlier finalize went through.
+A request's `CustomID` is a pointer so a missing id and an empty one are told apart: every line needs one, of 1 to 512 characters, unique within the call; a fault is refused locally with the API's message ("Line 2: custom_id \"a\" is already in the batch."). Each line carries its custom id, a model (the request's, else the client's) and a state. A line's local images follow the inline threshold per line. `Create`, `Add` and `Finalize` are retried only on 429 and 529, since a repeat after a lost answer could create a second draft; a `Finalize` answered 409 reads the batch and returns it when an earlier finalize went through.
 
 ## Errors
 
@@ -285,11 +286,22 @@ A client of your own must be one the SDK can inspect: its `Transport` is `nil` (
 
 A missing API key is an `*AuthenticationError`, returned before anything is sent. A problem with your own arguments is a plain Go error, not an `*dn.Error`, and is also returned before anything is sent: an empty question list (in any request of `DecideMany`), a base URL that is not `https`, an HTTP client the SDK cannot inspect or that turns off TLS checks, a timeout not above 0, negative retries, a negative inline threshold, a concurrency below 1, a poll interval under 10 s, or a value that cannot be encoded as JSON. `dn.ImageFile` reports an unreadable file itself.
 
-A request the API would refuse for its content is refused before anything is sent, with the API's own error class, `ErrorType` and message, and no status or request id: an image of another format or over its limits, more than 4 images, a URL that is not `https`, a choice with no option or more than 255, a score with more than 10 levels, a truth with neither instructions nor criteria, a number question without instructions are `*BadRequestError`; an empty score and a number grid that cannot be built (`min` above `max`, `step` not above 0, more than 4,096 values) are `*ValidationError` with the API's entries. In `DecideMany` and a batch, such a fault in any request fails the whole call. Token limits are left to the API.
+The server never sees a request the client could have refused. Every fixed rule the API documents is checked before anything is sent, in the server's order, and a fault returns what the server would answer, with no status and no request id:
+
+| Fault | Returned as |
+|---|---|
+| more than 128 objects and arrays inside each other; an unknown question type (a number question on `Systemone` included) | `*BadRequestError`, `ErrorType` `api_usage_error`, "Invalid request." |
+| a question that is not an object or has no type; instructions, a state, an option description, a level or a truth side that is not a string, an object or an array; a choice or score without criteria, of the wrong shape, or a score with no level; a number grid that cannot be built (a bound not a number, beyond 2^53, more than 6 decimals, `step` not above 0, `min` above `max`, more than 4,096 values); a session `Window` or `TTLSeconds` out of range | `*ValidationError` with the API's entries, empty `ErrorType` |
+| a choice with no option or more than 255, a score over 10 levels, a truth without instructions or criteria, a number without instructions | `*BadRequestError` with the API's message and an empty `ErrorType` |
+| an image over its limits, more than 4, an empty or repeated id, a URL that is not `https` | `*BadRequestError`, `api_usage_error` |
+| an `https` image URL over 2,048 characters, with user information, on a port other than 443, or naming a private address | `*BadRequestError`, `image_url_refused` |
+| a batch line without a valid or unique `CustomID`, an `Add` with no requests, a `List` page out of range | `*BadRequestError`, `api_usage_error` |
+
+After a call to `Models`, the client also checks the limits only that list states: a model that answers no number questions or serves no sessions, a lower `max_window`, the batch's `requests_per_batch` and `max_custom_id_chars`. In `DecideMany` and a batch, a fault in any request fails the whole call. Token counts and anything that depends on the server's state are left to the API.
 
 ## Retries and timeouts
 
-Each attempt has 10 seconds, covering the whole attempt: connecting, sending, and reading the response to its last byte. Requests that fail with 408, 429, any 5xx, a timeout or a connection error are retried twice, waiting as long as the API asks (`retry-after-ms`, else `Retry-After` in seconds or as an HTTP date, at most 60 s) or else backing off exponentially from 0.5 s, with jitter, up to 8 s. 400, 401, 402, 403, 404 and 422 are never retried. A decision changes nothing on the server, so a retry is always safe. An image upload to storage is retried on 5xx and connection errors the same way. Batch `Create`, `Add` and `Finalize` are the exception: they are retried only on 429 and 529, which the API never applies.
+Each attempt has 10 seconds, covering the whole attempt: connecting, sending, and reading the response to its last byte. Requests that fail with 408, 429, any 5xx, a timeout or a connection error are retried twice, waiting as long as the API asks (`retry-after-ms`, else `Retry-After` in seconds or as an HTTP date, at most 60 s) or else backing off exponentially from 0.5 s, with jitter, up to 8 s. 400, 401, 402, 403, 404 and 422 are never retried. A decision changes nothing on the server, so a retry is always safe. An image upload to storage is retried on 5xx and connection errors the same way; a storage `403` after the upload URL's 5 minutes have passed (a slow connection) is presigned again once. Batch `Create`, `Add` and `Finalize` are the exception: they are retried only on 429 and 529, which the API never applies.
 
 ## Configuration
 
@@ -318,7 +330,7 @@ An option wins over the environment, and the environment over the default. The b
 DECISIONNODE_CONFORMANCE_DIR=/path/to/decision-node-conformance go test ./...
 ```
 
-The conformance tests run every case of the DecisionNode conformance suite against its mock server, and need `python3` for that server. `DECISIONNODE_CONFORMANCE_DIR` must point at a checkout of the suite: when it is unset the conformance test fails, it is never skipped. To run only the unit tests, pass `-skip TestConformance`. This version passes conformance suite 1.4; CI checks the suite out at the commit named once, in `CONFORMANCE_REF` in `.github/workflows/ci.yml`, with every action pinned to a commit and no credentials left in the checkouts.
+The conformance tests run every case of the DecisionNode conformance suite against its mock server, and need `python3` for that server. `DECISIONNODE_CONFORMANCE_DIR` must point at a checkout of the suite: when it is unset the conformance test fails, it is never skipped. To run only the unit tests, pass `-skip TestConformance`. This version passes conformance suite 1.5; CI checks the suite out at the commit named once, in `CONFORMANCE_REF` in `.github/workflows/ci.yml`, with every action pinned to a commit and no credentials left in the checkouts.
 
 ## License
 
