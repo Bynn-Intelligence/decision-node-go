@@ -93,13 +93,15 @@ func (c *Client) prepare(req Request, systemone bool, customID *string) (*prepar
 	if err := checkNesting(depth); err != nil {
 		return nil, err
 	}
+	// The counts are 422 entries, after the state's and the questions'.
+	qc.countEntries(req.Images, videos, lim)
 	if err := qc.err(); err != nil {
 		return nil, err
 	}
 	if err := checkImages(req.Images, lim); err != nil {
 		return nil, err
 	}
-	videosJSON, err := checkVideos(videos, req.Images, lim)
+	videosJSON, err := checkVideos(videos, req.Images)
 	if err != nil {
 		return nil, err
 	}

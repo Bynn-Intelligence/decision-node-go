@@ -12,14 +12,14 @@ Implements version 1.2 of the DecisionNode SDK surface: sixteen images, videos a
 
 - Point and box questions: `Point`, `PointWith`, `Box` and `BoxWith` (`Question.Image` names the image to look in, `Question.Units` is `pixels` or `normalized`), and the answers `PointAnswer` (`X`, `Y`, `Present`, `Confidence`, `Image`, `Width`, `Height`) and `BoxAnswer` (`X1`, `Y1`, `X2`, `Y2` and the same), read with `Decision.Point` and `Decision.Box`. An answer with a field missing or of the wrong type is an `UnknownAnswer`. Their rules are checked locally with the API's 422 entries: an image in the request, `image` naming one of them (required with two or more), and the units; a point or box without instructions is the API's 400. `Systemone` refuses both types locally, like number questions.
 - Videos sent as the frames the caller sampled: `Video` (`ID`, `Frames`, and the optional `FPS`, `Start` and `End`), `VideoFrame` built with `VideoFrameData` (bytes, the media type taken from the first bytes when not given) and `VideoFrameBase64` (base64 text sent as given), and `Request.Videos`, which also takes a video in its JSON wire form. `Systemone`, the helper requests, `DecideMany`, batch requests and `CheckDecide` take videos as `Decide` does. Frames always go inline: they are never uploaded, cached, resized or re-encoded.
-- The API's video rules are checked before anything is sent, with the API's own message: at most 4 videos, an id that is present and unique across images and videos, at least one frame, frame times at least 0 and strictly increasing, a JPEG, PNG or WebP media type for every frame, `FPS` above 0 and at most 4, `Start` and `End` at least 0 and `End` after `Start`. The number of frames, their sizes and their pixels are left to the server.
+- The API's video rules are checked before anything is sent, with the API's own message: an id that is present and unique across images and videos, at least one frame, frame times at least 0 and strictly increasing, a JPEG, PNG or WebP media type for every frame, `FPS` above 0 and at most 4, `Start` and `End` at least 0 and `End` after `Start`. The number of frames, their sizes and their pixels are left to the server.
 - `Usage.VideoFrames` and `Usage.VideoSeconds`, nil for a request without videos, and `Decision.Warnings`, the server's notes exactly as sent, empty when there are none.
 - `MaxVideos` and `MaxVideoFPS`.
 
 ### Changed
 
 - `SpecVersion` is `"1.2"`.
-- Up to 16 images a request (`MaxImages`), all of a request's uploads in one presign of up to 16 files. The 17th image is refused locally with "Too many images: 17, the limit is 16.".
+- Up to 16 images a request (`MaxImages`), all of a request's uploads in one presign of up to 16 files. More than 16 images, or more than 4 videos, is refused locally as the API's 422: a `*ValidationError` with a `too_long` entry on `["body", "images"]` or `["body", "videos"]`, listed after the request's other entries. `Upload` with more than 16 images returns the presign's own 400, "files: 1 to 16 files, got 17.".
 - A model's image and video limits held from `Models` are also read where the API publishes them, in its `images` and `videos` objects.
 
 ## [0.2.0] - Unreleased

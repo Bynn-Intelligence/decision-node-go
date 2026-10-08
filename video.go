@@ -129,21 +129,13 @@ func encodeVideos(videos []any) ([]encodedVideo, int, error) {
 }
 
 // checkVideos checks a request's videos in the server's order, after its
-// images: the count, then each video in turn, ids unique across the images
-// and the videos. It returns the body's `,"videos":[...]` member, or nothing
+// images: each video in turn, ids unique across the images and the videos
+// (their count is one of the request's 422 entries, countEntries). It returns the body's `,"videos":[...]` member, or nothing
 // when there are no videos. A video the API would refuse is its own
 // *BadRequestError.
-func checkVideos(videos []encodedVideo, images []Image, lim limits) ([]byte, error) {
+func checkVideos(videos []encodedVideo, images []Image) ([]byte, error) {
 	if len(videos) == 0 {
 		return nil, nil
-	}
-	most := MaxVideos
-	if lim.maxVideos > 0 {
-		most = lim.maxVideos
-	}
-	if len(videos) > most {
-		msg := fmt.Sprintf("Too many videos: %d, the limit is %d.", len(videos), most)
-		return nil, localBadRequest("api_usage_error", msg, fmt.Sprintf("%d videos, the limit is %d", len(videos), most))
 	}
 	seen := make(map[string]bool, len(images)+len(videos))
 	for _, img := range images {

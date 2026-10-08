@@ -82,13 +82,19 @@ func TestCheckImage(t *testing.T) {
 	for i := 0; i < 17; i++ {
 		seventeen = append(seventeen, ImageURL(fmt.Sprint(i), "https://x/a"))
 	}
-	if err := checkImages(seventeen[:16], limits{}); err != nil {
-		t.Fatal(err)
+	var qc questionCheck
+	qc.countEntries(seventeen[:16], nil, limits{})
+	if qc.err() != nil {
+		t.Fatal(qc.err())
 	}
-	if err := checkImages(seventeen, limits{}); err == nil {
-		t.Fatal("seventeen images accepted")
+	qc.countEntries(seventeen, nil, limits{})
+	var v *ValidationError
+	if err := qc.err(); !errors.As(err, &v) || len(v.Entries) != 1 {
+		t.Fatalf("seventeen images: %v", err)
 	}
-	if err := checkImages(seventeen[:5], limits{maxImages: 4}); err == nil {
+	qc = questionCheck{}
+	qc.countEntries(seventeen[:5], nil, limits{maxImages: 4})
+	if qc.err() == nil {
 		t.Fatal("five images accepted under a held limit of 4")
 	}
 	if err := checkImages([]Image{ImageURL("a", "https://x/a"), ImageURL("a", "https://x/b")}, limits{}); err == nil {

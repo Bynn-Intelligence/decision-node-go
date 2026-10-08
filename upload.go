@@ -25,6 +25,8 @@ const (
 	// cacheMargin is how long before its expires_at an upload stops being
 	// reused.
 	cacheMargin = 5 * time.Minute
+	// maxUploadFiles is the most files one POST /v1/uploads takes.
+	maxUploadFiles = 16
 )
 
 // cacheKey identifies local image bytes: their SHA-256 and media type.
@@ -214,6 +216,11 @@ func (c *Client) placeImages(ctx context.Context, images []Image, withID bool) (
 func (c *Client) Upload(ctx context.Context, images []Image) ([]UploadResult, error) {
 	if c.err != nil {
 		return nil, c.err
+	}
+	if len(images) > maxUploadFiles {
+		// One presign takes 1 to 16 files: its own 400, before anything is sent.
+		msg := fmt.Sprintf("files: 1 to %d files, got %d.", maxUploadFiles, len(images))
+		return nil, localBadRequest("api_usage_error", msg, msg)
 	}
 	if err := checkImages(images, c.limitsFor("")); err != nil {
 		return nil, err

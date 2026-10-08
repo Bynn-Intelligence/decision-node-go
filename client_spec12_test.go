@@ -30,9 +30,23 @@ func TestSixteenImagesInlineAndTheSeventeenthRefused(t *testing.T) {
 		imgs = append(imgs, dn.ImageData(fmt.Sprintf("i%d", i), png, ""))
 	}
 	_, err := c.Decide(context.Background(), dn.Request{Questions: oneTruth(), Images: imgs})
-	var bad *dn.BadRequestError
-	if !errors.As(err, &bad) || bad.Error() != "Too many images: 17, the limit is 16." || bad.ErrorType != "api_usage_error" || bad.Status != 0 {
+	var tooMany *dn.ValidationError
+	if !errors.As(err, &tooMany) || tooMany.Status != 0 || len(tooMany.Entries) != 1 {
 		t.Fatalf("17 images: %v", err)
+	}
+	entry := tooMany.Entries[0].(map[string]any)
+	given := entry["input"].([]any)
+	if entry["type"] != "too_long" || fmt.Sprint(entry["loc"]) != "[body images]" ||
+		entry["msg"] != "List should have at most 16 items after validation, not 17" || len(given) != 17 ||
+		fmt.Sprint(given[0]) != "map[id:i0 media_type:image/png]" ||
+		fmt.Sprint(entry["ctx"]) != "map[actual_length:17 field_type:List max_length:16]" {
+		t.Fatalf("the entry: %v", entry)
+	}
+	// One presign takes 16 files: Upload refuses the 17th with the presign's 400.
+	_, err = c.Upload(context.Background(), imgs)
+	var bad *dn.BadRequestError
+	if !errors.As(err, &bad) || bad.Error() != "files: 1 to 16 files, got 17." || bad.ErrorType != "api_usage_error" {
+		t.Fatalf("upload of 17: %v", err)
 	}
 	if _, err := c.Decide(context.Background(), dn.Request{Questions: oneTruth(), Images: imgs[:16]}); err != nil {
 		t.Fatal(err)
@@ -114,8 +128,6 @@ func TestVideoLocalChecks(t *testing.T) {
 		videos []any
 		msg    string
 	}{
-		{"five videos", nil, []any{ok, dn.Video{ID: "b", Frames: ok.Frames}, dn.Video{ID: "c", Frames: ok.Frames}, dn.Video{ID: "d", Frames: ok.Frames}, dn.Video{ID: "e", Frames: ok.Frames}},
-			"Too many videos: 5, the limit is 4."},
 		{"no id", nil, []any{dn.Video{Frames: ok.Frames}}, "Video 0 needs an id."},
 		{"id of an image", []dn.Image{dn.ImageData("dock", jpg, "")}, []any{ok}, "Video id 'dock' is used twice (ids are unique across images and videos)."},
 		{"id twice", nil, []any{ok, ok}, "Video id 'dock' is used twice (ids are unique across images and videos)."},
@@ -152,6 +164,18 @@ func TestVideoLocalChecks(t *testing.T) {
 			t.Errorf("%s: got %v, want %q", tc.name, err, tc.msg)
 		}
 	}
+	// Five videos are the API's 422 too_long, listed after a question's entries.
+	five := []any{ok, dn.Video{ID: "b", Frames: ok.Frames}, dn.Video{ID: "c", Frames: ok.Frames}, dn.Video{ID: "d", Frames: ok.Frames},
+		map[string]any{"id": "e", "frames": []any{}}}
+	err := c.CheckDecide(dn.Request{Questions: dn.Questions{dn.Q("route", map[string]any{"type": "choice", "instructions": "?"})}, Videos: five})
+	var tooMany *dn.ValidationError
+	if !errors.As(err, &tooMany) || len(tooMany.Entries) != 2 {
+		t.Fatalf("five videos: %v", err)
+	}
+	if e := tooMany.Entries[1].(map[string]any); e["type"] != "too_long" || fmt.Sprint(e["loc"]) != "[body videos]" ||
+		len(e["input"].([]any)) != 5 || tooMany.Entries[0].(map[string]any)["type"] != "missing" {
+		t.Fatalf("five videos: %v", tooMany.Entries)
+	}
 	// Not checked locally: the frame count, the bytes against their type.
 	many := make([]dn.VideoFrame, 65)
 	for i := range many {
@@ -161,7 +185,7 @@ func TestVideoLocalChecks(t *testing.T) {
 		t.Errorf("65 frames: %v", err)
 	}
 	// A value that is not a video is an argument error, not an API error.
-	err := c.CheckDecide(dn.Request{Questions: oneTruth(), Videos: []any{"dock.mp4"}})
+	err = c.CheckDecide(dn.Request{Questions: oneTruth(), Videos: []any{"dock.mp4"}})
 	var apiErr *dn.Error
 	if err == nil || errors.As(err, &apiErr) {
 		t.Errorf("a string video: %v", err)

@@ -465,19 +465,12 @@ func (qc *questionCheck) number(id string, q map[string]json.RawMessage, raw []b
 	}
 }
 
-// checkImages checks a request's images against the API's fixed rules: at
-// most 16 (URLs included), ids present and unique, URLs https and fetchable by
-// the server's rules, local bytes JPEG, PNG or WebP by their first bytes and
-// matching a declared type, at most 10 MB and 40 megapixels.
+// checkImages checks a request's images against the API's fixed rules: ids
+// present and unique, URLs https and fetchable by the server's rules, local
+// bytes JPEG, PNG or WebP by their first bytes and matching a declared type,
+// at most 10 MB and 40 megapixels. Their count is one of the request's 422
+// entries (countEntries).
 func checkImages(images []Image, lim limits) error {
-	most := MaxImages
-	if lim.maxImages > 0 {
-		most = lim.maxImages
-	}
-	if len(images) > most {
-		return localBadRequest("api_usage_error", fmt.Sprintf("Too many images: %d, the limit is %d.", len(images), most),
-			fmt.Sprintf("%d images, the limit is %d", len(images), most))
-	}
 	seen := make(map[string]bool, len(images))
 	for i, img := range images {
 		if img.id == "" {
@@ -525,6 +518,66 @@ func checkImage(img Image, lim limits) error {
 		return usageError(fmt.Sprintf("Image %s is %dx%d pixels, over 40 megapixels.", img.id, w, h))
 	}
 	return nil
+}
+
+// countEntries adds the API's 422 too_long entry for more images than a
+// request takes (16, or the held limit) and for more videos (4), after the
+// request's other entries, the images' before the videos'. The entry's input
+// is the list in its wire form, a local image as {"id", "media_type"}: nothing
+// is encoded or uploaded to build an error.
+func (qc *questionCheck) countEntries(images []Image, videos []encodedVideo, lim limits) {
+	mostImages, mostVideos := MaxImages, MaxVideos
+	if lim.maxImages > 0 {
+		mostImages = lim.maxImages
+	}
+	if lim.maxVideos > 0 {
+		mostVideos = lim.maxVideos
+	}
+	if n := len(images); n > mostImages {
+		given := make([]any, n)
+		for i, img := range images {
+			given[i] = imageInput(img)
+		}
+		qc.tooLong("images", given, mostImages)
+	}
+	if n := len(videos); n > mostVideos {
+		given := make([]any, n)
+		for i, v := range videos {
+			if v.typed == nil {
+				given[i] = json.RawMessage(v.raw)
+				continue
+			}
+			types := make([]string, len(v.typed.Frames))
+			for j, f := range v.typed.Frames {
+				types[j] = f.MediaType()
+			}
+			given[i] = json.RawMessage(v.typed.appendWire(nil, types))
+		}
+		qc.tooLong("videos", given, mostVideos)
+	}
+}
+
+func (qc *questionCheck) tooLong(name string, given []any, most int) {
+	qc.entry("too_long", []any{"body", name}, fmt.Sprintf("List should have at most %d items after validation, not %d", most, len(given)),
+		given, map[string]any{"field_type": "List", "max_length": most, "actual_length": len(given)},
+		fmt.Sprintf("%d %s, the limit is %d", len(given), name, most))
+}
+
+// imageInput is an image as a 422 entry lists it: its wire form, a local
+// image's bytes left out.
+func imageInput(img Image) map[string]any {
+	out := map[string]any{"id": img.id}
+	switch {
+	case img.url != "":
+		out["url"] = img.url
+		return out
+	case img.uploadID != "":
+		out["upload_id"] = img.uploadID
+	}
+	if t := img.MediaType(); t != "" {
+		out["media_type"] = t
+	}
+	return out
 }
 
 // blockedRanges are the addresses the server never fetches an image from.
