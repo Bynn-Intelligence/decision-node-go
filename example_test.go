@@ -124,3 +124,114 @@ func ExampleError() {
 		fmt.Println(apiErr.Status, apiErr.RequestID, apiErr.Reason)
 	}
 }
+
+func ExampleImageURL() {
+	client := dn.NewClient()
+	// A URL is the fastest image input: nothing is uploaded.
+	d, err := client.Decide(context.Background(), dn.Request{
+		State:  "Claim 4411: total 740.00 SEK.",
+		Images: []dn.Image{dn.ImageURL("receipt", "https://files.example.com/claims/4411/receipt.jpg")},
+		Questions: dn.Questions{
+			dn.Q("total_matches", dn.Truth("Does the total on the receipt equal the total in the claim?")),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(d.Truth("total_matches").Truth)
+}
+
+func ExampleClient_Number() {
+	client := dn.NewClient()
+	a, err := client.Number(context.Background(), dn.NumberRequest{
+		State:        "Drone frame over row B4 of the north car park.",
+		Instructions: "How many cars are visible?",
+		Min:          0,
+		Max:          50,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(a.Number, a.Expected, a.Confidence, a.Probabilities)
+}
+
+func ExampleClient_OpenSession() {
+	client := dn.NewClient()
+	ctx := context.Background()
+	s, err := client.OpenSession(ctx, dn.SessionRequest{
+		Instructions: "You are the mission supervisor of a survey drone.",
+		State:        map[string]any{"mission": "Survey the north field at 40 m"},
+		Questions: dn.Questions{
+			dn.Q("abort", dn.Truth("Should the mission be aborted now?")),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() { _, _ = s.End(ctx) }()
+	if err := s.Connect(ctx); err != nil {
+		log.Fatal(err)
+	}
+	if _, err := s.Send(ctx, dn.Frame{Frame: map[string]any{"battery": 0.31, "wind_mps": 11.4}}); err != nil {
+		log.Fatal(err)
+	}
+	for ev := range s.Replies() {
+		switch e := ev.(type) {
+		case *dn.Reply:
+			fmt.Println(e.Seq, e.Answers["abort"].(*dn.TruthAnswer).Truth)
+		case *dn.FrameError:
+			fmt.Println("frame", e.Seq, e.ErrorType, e.Message)
+		case *dn.SessionClosed:
+			fmt.Println("closed", e.Code, e.Reopen)
+		}
+	}
+}
+
+func ExampleClient_Supervise() {
+	client := dn.NewClient()
+	feed := make(chan dn.Frame)
+	go func() {
+		defer close(feed)
+		for _, battery := range []float64{0.9, 0.6, 0.3} {
+			feed <- dn.Frame{Frame: map[string]any{"battery": battery}}
+			time.Sleep(time.Second)
+		}
+	}()
+	closed, err := client.Supervise(context.Background(), dn.SessionRequest{
+		Questions: dn.Questions{dn.Q("abort", dn.Truth("Should the mission be aborted now?"))},
+	}, feed, func(ev dn.SessionEvent) {
+		if r, ok := ev.(*dn.Reply); ok {
+			fmt.Println(r.Seq, r.Answers["abort"].(*dn.TruthAnswer).Truth)
+		}
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(closed)
+}
+
+func ExampleClient_RunBatch() {
+	client := dn.NewClient()
+	var reqs []dn.BatchRequest
+	for i, ticket := range []string{"I was charged twice.", "The app crashes on start."} {
+		reqs = append(reqs, dn.BatchRequest{
+			CustomID: fmt.Sprintf("ticket-%d", i+1),
+			Request: dn.Request{
+				State:     ticket,
+				Questions: dn.Questions{dn.Q("route", dn.Choice("Where should this go?", []string{"billing", "bug"}))},
+			},
+		})
+	}
+	batch, results, err := client.RunBatch(context.Background(), reqs, dn.RunBatchOptions{PollInterval: 30 * time.Second})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(batch.State, batch.Counters.Completed)
+	for _, r := range results {
+		if r.Decision != nil {
+			fmt.Println(r.CustomID, r.Decision.Choice("route").Choice)
+		} else {
+			fmt.Println(r.CustomID, r.Status, r.StatusText, r.Err)
+		}
+	}
+}

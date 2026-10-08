@@ -2,9 +2,11 @@
 
 The Go client for the [DecisionNode](https://decisionnode.com) API: ask structured questions about any state and get calibrated numbers back.
 
-- Three question types: `truth` (how likely a statement is true), `choice` (one option of a set) and `score` (a place on an ordered scale).
+- Four question types: `truth` (how likely a statement is true), `choice` (one option of a set), `score` (a place on an ordered scale) and `number` (a value on a grid you define).
+- Decisions one at a time, many at once, as a live session over a WebSocket, or as a batch at half the price.
+- Images by URL, from files or from bytes, checked locally and uploaded only when that is faster.
 - Typed answers and typed errors, matched with `errors.As`.
-- Retries, timeouts and concurrency built in. Standard library only.
+- Retries, timeouts, connection reuse and HTTP/2 built in. One dependency, for WebSockets.
 
 ## Install
 
@@ -69,8 +71,21 @@ There are no thresholds in the API: what 0.94 means is your code's decision.
 | `dn.TruthWith(instructions, ifTrue, ifFalse)` | The same, with what a yes and a no mean (either may be `nil`) | `*TruthAnswer` |
 | `dn.Choice(instructions, options)` | Which option fits? | `*ChoiceAnswer`: `Choice`, `Confidence`, `Probabilities` by option name |
 | `dn.Score(instructions, levels)` | Where on this scale, low to high? | `*ScoreAnswer`: `Score`, `Confidence`, `Probabilities` and `Legend` by level index |
+| `dn.Number(instructions)` | Which value of 0 to 255? | `*NumberAnswer`: `Number`, `Expected`, `Confidence`, `Probabilities` by value |
+| `dn.NumberWith(instructions, min, max, step)` | Which value of the grid `min`, `min+step`, ... up to `max`? (`nil` leaves a bound to its default: 0, 255, 1) | `*NumberAnswer` |
 
-`options` is `dn.Options` (ordered names with descriptions), a `map[string]string` of name to description, or a `[]string` of names. `levels` is a slice of levels, 1 to 10.
+`options` is `dn.Options` (ordered names with descriptions), a `map[string]string` of name to description, or a `[]string` of names. `levels` is a slice of levels, 1 to 10. A number grid holds at most 4,096 values; `min` and `step` take up to 6 decimals, and a `json.Number` keeps a decimal exact. `NumberAnswer.Probabilities` is keyed by each value exactly as the server wrote it (`"7"`, `"3.5"`) and lists the values above 0.001.
+
+```go
+d, err := client.Decide(ctx, dn.Request{
+	State: "Drone frame over row B4 of the north car park.",
+	Questions: dn.Questions{
+		dn.Q("cars", dn.NumberWith("How many cars are visible?", 0, 50, nil)),
+		dn.Q("rating", dn.NumberWith("How tidy is the row, in halves?", 0, 5, 0.5)),
+	},
+})
+fmt.Println(d.Number("cars").Number, d.Number("cars").Expected) // 7 7.0
+```
 
 `State`, instructions, descriptions and levels take a string or any value that encodes to JSON: a struct, a map, a slice or a `json.RawMessage`. A question in its JSON wire form, such as a `map[string]any`, works wherever a builder does:
 
@@ -78,7 +93,7 @@ There are no thresholds in the API: what 0.94 means is your code's decision.
 dn.Q("escalate", map[string]any{"type": "truth", "instructions": "Escalate to a human now?"})
 ```
 
-Question ids are any string, and answers come back under the same id. Read them with `d.Truth(id)`, `d.Choice(id)` and `d.Score(id)` (nil when the answer is of another type), or `d.Answer(id)` for the `dn.Answer` interface. An answer of a type this version does not know yet is an `*UnknownAnswer` holding the raw fields. So is an answer of a known type whose fields are missing or of the wrong type: the decision itself does not fail.
+Question ids are any string, and answers come back under the same id. Read them with `d.Truth(id)`, `d.Choice(id)`, `d.Score(id)` and `d.Number(id)` (nil when the answer is of another type), or `d.Answer(id)` for the `dn.Answer` interface. An answer of a type this version does not know yet is an `*UnknownAnswer` holding the raw fields. So is an answer of a known type whose fields are missing or of the wrong type: the decision itself does not fail.
 
 Numbers are passed through exactly as received: a probability list may read 0.8200000000000001 or sum to 0.99.
 
@@ -91,35 +106,53 @@ Numbers are passed through exactly as received: a probability list may read 0.82
 | `Check(ctx, dn.CheckRequest)` | One truth question. Returns a `*TruthAnswer`. |
 | `Classify(ctx, dn.ClassifyRequest)` | One choice question. Returns a `*ChoiceAnswer`. |
 | `Score(ctx, dn.ScoreRequest)` | One score question. Returns a `*ScoreAnswer`. |
+| `Number(ctx, dn.NumberRequest)` | One number question, with the id `number`. Returns a `*NumberAnswer`. |
 | `Gate(ctx, dn.GateRequest)` | Judges an action before it runs: `risk` (score), `touches_production` (truth) and `verdict` (allow, confirm or block). |
-| `Models(ctx)` | The models your key can use, with their published limits, as `[]dn.ModelInfo`. |
+| `Systemone(ctx, dn.Request)` | One request to `POST /v1/systemone`, the strict path for truth, choice and score questions. Returns a `*Decision` read like `Decide`'s. |
+| `Upload(ctx, images)` | Uploads local images whatever their size and returns their upload ids, to name them later with `dn.ImageUpload`. |
+| `OpenSession(ctx, dn.SessionRequest)` | Opens a session. Returns a `*Session`; see [Sessions](#sessions). |
+| `Supervise(ctx, body, feed, onEvent)` | Keeps a feed of frames answered across sessions, reopening as needed. |
+| `Batches()` | The Batch API: `Create`, `Add`, `Finalize`, `Get`, `List`, `Results`, `Cancel`; see [Batches](#batches). |
+| `RunBatch(ctx, requests, dn.RunBatchOptions)` | A batch from start to results in one call. |
+| `Models(ctx)` | The models your key can use, with their published limits, as `[]dn.ModelInfo`. The session, batch, number and upload limits are also typed fields (`Sessions`, `Batch`, `NumberMaxGridValues`, ...). |
 | `DecideRaw(ctx, body)` | Sends a body exactly as given and returns the parsed response. For API fields this version does not know yet. |
 
-`Check`, `Classify`, `Score` and `Gate` take `Images` and `Model` like `Decide`. `Check`, `Classify` and `Score` promise a typed answer, so when their own answer is missing or malformed they return a `*ServerError` with the response's status, `RequestID` and `Reason`. `Decide` returns such an answer as an `*UnknownAnswer` instead.
+`Check`, `Classify`, `Score`, `Number` and `Gate` take `Images` and `Model` like `Decide`. `Check`, `Classify`, `Score` and `Number` promise a typed answer, so when their own answer is missing or malformed they return a `*ServerError` with the response's status, `RequestID` and `Reason`. `Decide` returns such an answer as an `*UnknownAnswer` instead.
 
 A `*Decision` holds `Answers`, `Model` (the resolved version), `Usage.InputTokens` and `Usage.OutputTokens` (`*int`), `RequestID`, `LatencyMs` (`*float64`, the server's time), `Safety` and `Raw` (the parsed body). A value the server did not send is `nil`, never 0.
 
-`dn.SpecVersion` is the version of the DecisionNode SDK specification this package implements, `"1.0"`.
+An answer the server sent with the wire type `noul` (every `Systemone` truth answer) is read into a `*TruthAnswer` too.
 
-The client is safe for concurrent use and reuses its connections: create one and share it. Cancel or bound any call with its context.
+`dn.SpecVersion` is the version of the DecisionNode SDK specification this package implements, `"1.1"`.
+
+The client is safe for concurrent use and reuses its connections (HTTP/2 when the server offers it, TLS sessions resumed): create one and share it. Cancel or bound any call with its context.
 
 ### Images
 
+Send an image by URL when you can. It is the fastest input: nothing is uploaded, the request stays small, and the server fetches the image while it reads the request.
+
 ```go
-receipt, err := dn.ImageFile("receipt", "receipt.jpg")
-if err != nil {
-	log.Fatal(err)
-}
 d, err := client.Decide(ctx, dn.Request{
 	State:  map[string]any{"claim": map[string]string{"total": "740.00", "currency": "SEK"}},
-	Images: []dn.Image{receipt},
+	Images: []dn.Image{dn.ImageURL("receipt", "https://files.example.com/claims/4411/receipt.jpg")},
 	Questions: dn.Questions{
 		dn.Q("total_matches", dn.Truth("Does the total on the receipt equal the total in the claim?")),
 	},
 })
 ```
 
-`dn.ImageFile(id, path)` reads a JPEG, PNG or WebP file right away and returns an error when the file cannot be read or is in another format. `dn.ImageData(id, bytes, mediaType)` sends bytes; with an empty `mediaType` the type is taken from the first bytes (JPEG, PNG or WebP), and bytes in any other format make the call fail before anything is sent. `dn.ImageURL(id, url)` sends an `https` URL for the API to fetch. Every question sees every image. Up to 4 images a request, 10 MB each.
+| Builder | Sends |
+|---|---|
+| `dn.ImageURL(id, url)` | The URL, for the server to fetch. `https`, at most 2,048 characters. Recommended. |
+| `dn.ImageFile(id, path)` | The file, read when the `Image` is made (an unreadable file is an error there). |
+| `dn.ImageData(id, bytes, mediaType)` | The bytes. An empty `mediaType` is taken from the first bytes. |
+| `dn.ImageBase64(id, text, mediaType)` | Bytes given as base64 text (a `data:` prefix is accepted). |
+| `dn.ImageReader(id, r, mediaType)` | The bytes read from an `io.Reader`, read when the `Image` is made. |
+| `dn.ImageUpload(id, uploadID, mediaType)` | An upload made earlier (`client.Upload`), less than an hour old. |
+
+Every image is checked before anything is sent: at most 4 a request (URLs included), ids present and unique, local bytes JPEG, PNG or WebP by their first bytes (and matching a given media type), at most 10 MB, at most 40 megapixels read from the image header. A failure is the API's own `*BadRequestError` with no status, and nothing is sent. No image is resized or re-encoded.
+
+Local images travel the faster way for their size. When a request's local images together are under `dn.DefaultInlineThreshold` (524,288 bytes; `dn.WithInlineThreshold` changes it) they go inline as base64. At or above it they are uploaded first: one `POST /v1/uploads` for all of them, then the bytes straight to storage, in parallel, then the request names them by `upload_id`. The client remembers what it uploaded, by the bytes' SHA-256, in memory, until 5 minutes before the upload expires: the same bytes in a later call, in another request of `DecideMany`, in a session frame or a batch line are named by their `upload_id` whatever their size, and are never uploaded twice at once. If the server answers that an upload the client named has expired or is gone, the client uploads it again and sends the request once more; that does not count as a retry.
 
 ### Safety
 
@@ -134,6 +167,79 @@ client := dn.NewClient(dn.WithHeaders(map[string]string{
 ```
 
 The body's extra field is then in `d.Raw`.
+
+## Sessions
+
+A session sends the fixed part of a decision (instructions, state, questions) once, then answers a stream of frames over one WebSocket, each frame costing roughly its own tokens. Replies come back as they are ready; when frames arrive faster than they are answered the newest wins, and the reply that superseded others lists them in `Dropped`.
+
+```go
+s, err := client.OpenSession(ctx, dn.SessionRequest{
+	Instructions: "You are the mission supervisor of a survey drone.",
+	State:        map[string]any{"mission": "Survey the north field at 40 m"},
+	Questions:    dn.Questions{dn.Q("abort", dn.Truth("Should the mission be aborted now?"))},
+})
+if err != nil {
+	log.Fatal(err)
+}
+defer s.End(ctx)
+if err := s.Connect(ctx); err != nil {
+	log.Fatal(err)
+}
+s.Send(ctx, dn.Frame{Frame: map[string]any{"battery": 0.31, "wind_mps": 11.4}})
+for ev := range s.Replies() {
+	switch e := ev.(type) {
+	case *dn.Reply:
+		fmt.Println(e.Seq, e.Answers["abort"].(*dn.TruthAnswer).Truth)
+	case *dn.FrameError:
+		fmt.Println(e.Seq, e.ErrorType, e.Message)
+	case *dn.SessionClosed:
+		fmt.Println(e.Code, e.Reopen)
+	}
+}
+```
+
+| Call | Does |
+|---|---|
+| `OpenSession(ctx, dn.SessionRequest)` | `State`, `Questions`, `Instructions`, `Model`, `Window` (frames each answer sees, 1 to 64) and `TTLSeconds` (1 to 3,600); 0 leaves a number to the server. Returns a `*Session` with every field of the server's answer, the questions already answered on the fixed part. A key at its limit of open sessions gets a `*SessionLimitError` (also a `*RateLimitError`), never retried. |
+| `s.Connect(ctx)` | Opens the socket. The key travels in the handshake's `Authorization` header, never in the URL. |
+| `s.Send(ctx, dn.Frame)` | Sends one frame (`Frame`, `Image`, `Questions`, `Reset`, `Seq`) and returns its `seq`, counted from 1 unless given. It never waits for the reply. A frame's image follows the same rules as a request's, except that a URL is refused. |
+| `s.Next(ctx)`, `s.Replies()` | The events: `*dn.Reply`, `*dn.FrameError` (a value, never an error: the session goes on), and last `*dn.SessionClosed`. Pings are answered for you. |
+| `s.End(ctx)` | Ends the session. A session already ended is success. |
+| `s.Close()` | Closes the socket from your side. |
+
+`SessionClosed.Reopen` is true for the codes after which a new session with the same body should be opened: 1001, 1006, 1011, 4404, 4408, 4409 and 4410. After 1013 connect again to the same session. `client.Supervise(ctx, body, feed, onEvent)` does all of this for a long-lived feed: it sends each frame from the channel, hands every reply and frame error to `onEvent`, reopens on the reopen codes (at once on 4408 and 4410, else after a backoff of 1 s to 30 s with jitter), connects again on 1013, and stops on any other code, returning that `*SessionClosed`. When the feed channel is closed it waits for the outstanding replies, ends the session and returns.
+
+## Batches
+
+The Batch API answers many decide requests asynchronously, within 24 hours, at half the price. `RunBatch` does the whole lifecycle:
+
+```go
+batch, results, err := client.RunBatch(ctx, []dn.BatchRequest{
+	{CustomID: "ticket-1", Request: dn.Request{State: "I was charged twice.", Questions: questions}},
+	{CustomID: "ticket-2", Request: dn.Request{State: "The app crashes on start.", Questions: questions}},
+}, dn.RunBatchOptions{PollInterval: time.Minute})
+for _, r := range results {
+	if r.Decision != nil {
+		fmt.Println(r.CustomID, r.Decision.Choice("route").Choice)
+	} else {
+		fmt.Println(r.CustomID, r.Status, r.StatusText, r.Err) // a value, never returned
+	}
+}
+```
+
+It checks every request locally, creates an empty draft, adds the lines in calls of at most 10 MiB, finalizes, reads the batch every `PollInterval` (at least 10 s, default 60 s; the server's `Retry-After` when that is longer) until it ends, and reads the results. Past `Timeout` (default 26 hours) it returns a `*TimeoutError`. If adding fails, the draft is cancelled. The single calls are on `client.Batches()`:
+
+| Method | Does |
+|---|---|
+| `Create(ctx, requests)` | A draft with these lines (none: an empty draft). |
+| `Add(ctx, batchID, requests)` | Adds lines to a draft, split into calls of at most 10 MiB, in order. |
+| `Finalize(ctx, batchID)` | Queues the draft. |
+| `Get(ctx, batchID)` | The `*Batch`: `State`, `Counters`, the times, `Usage`, `Error`. |
+| `List(ctx, dn.BatchListOptions)` | One page of your batches, newest first. |
+| `Results(ctx, batchID)` | One `BatchResult` per line, in upload order: `Decision` for a 200 line, else `Err`, the error that status would give. |
+| `Cancel(ctx, batchID)` | Cancels the batch. Safe to repeat. |
+
+Each line carries its custom id, a model (the request's, else the client's) and a state. A line's local images follow the inline threshold per line. `Create`, `Add` and `Finalize` are retried only on 429 and 529, since a repeat after a lost answer could create a second draft; a `Finalize` answered 409 reads the batch and returns it when an earlier finalize went through.
 
 ## Errors
 
@@ -167,6 +273,7 @@ case errors.As(err, &apiErr):
 | 404 | `*NotFoundError` | |
 | 422 | `*ValidationError` | `Entries` |
 | 429 | `*RateLimitError` | `RetryAfter` (capped at 60 s) |
+| 429, `session_limit_exceeded` | `*SessionLimitError` (also a `*RateLimitError`), never retried | `RetryAfter` |
 | 529 | `*OverloadedError` | `RetryAfter` (capped at 60 s) |
 | other 5xx | `*ServerError` | |
 | any other status (405, 409, 408 after its retries, ...) | `*Error` with the status | |
@@ -176,11 +283,13 @@ Only 200 to 299 is a success. Redirects are never followed, even with a client o
 
 A client of your own must be one the SDK can inspect: its `Transport` is `nil` (Go's default transport) or an `*http.Transport`. The SDK copies the client and sets its own `CheckRedirect`. For an `https` base URL it refuses a transport of any other type (a wrapping `RoundTripper` included), an `*http.Transport` with `TLSClientConfig.InsecureSkipVerify` set, and one with its own `DialTLS` or `DialTLSContext`, since none of these can be shown to keep certificate and hostname checks on. A refused client is an argument error from `client.Err()` and from every call.
 
-A missing API key is an `*AuthenticationError`, returned before anything is sent. A problem with your own arguments is a plain Go error, not an `*dn.Error`, and is also returned before anything is sent: an empty question list (in any request of `DecideMany`), a base URL that is not `https`, an HTTP client the SDK cannot inspect or that turns off TLS checks, a timeout not above 0, negative retries, a concurrency below 1, image bytes in an unknown format, or a value that cannot be encoded as JSON. `dn.ImageFile` reports an unreadable file itself. Everything else is checked by the API, since limits differ by model and are listed by `Models`.
+A missing API key is an `*AuthenticationError`, returned before anything is sent. A problem with your own arguments is a plain Go error, not an `*dn.Error`, and is also returned before anything is sent: an empty question list (in any request of `DecideMany`), a base URL that is not `https`, an HTTP client the SDK cannot inspect or that turns off TLS checks, a timeout not above 0, negative retries, a negative inline threshold, a concurrency below 1, a poll interval under 10 s, or a value that cannot be encoded as JSON. `dn.ImageFile` reports an unreadable file itself.
+
+A request the API would refuse for its content is refused before anything is sent, with the API's own error class, `ErrorType` and message, and no status or request id: an image of another format or over its limits, more than 4 images, a URL that is not `https`, a choice with no option or more than 255, a score with more than 10 levels, a truth with neither instructions nor criteria, a number question without instructions are `*BadRequestError`; an empty score and a number grid that cannot be built (`min` above `max`, `step` not above 0, more than 4,096 values) are `*ValidationError` with the API's entries. In `DecideMany` and a batch, such a fault in any request fails the whole call. Token limits are left to the API.
 
 ## Retries and timeouts
 
-Each attempt has 10 seconds, covering the whole attempt: connecting, sending, and reading the response to its last byte. Requests that fail with 408, 429, any 5xx, a timeout or a connection error are retried twice, waiting as long as the API asks (`retry-after-ms`, else `Retry-After` in seconds or as an HTTP date, at most 60 s) or else backing off exponentially from 0.5 s, with jitter, up to 8 s. 400, 401, 402, 403, 404 and 422 are never retried. A decision changes nothing on the server, so a retry is always safe.
+Each attempt has 10 seconds, covering the whole attempt: connecting, sending, and reading the response to its last byte. Requests that fail with 408, 429, any 5xx, a timeout or a connection error are retried twice, waiting as long as the API asks (`retry-after-ms`, else `Retry-After` in seconds or as an HTTP date, at most 60 s) or else backing off exponentially from 0.5 s, with jitter, up to 8 s. 400, 401, 402, 403, 404 and 422 are never retried. A decision changes nothing on the server, so a retry is always safe. An image upload to storage is retried on 5xx and connection errors the same way. Batch `Create`, `Add` and `Finalize` are the exception: they are retried only on 429 and 529, which the API never applies.
 
 ## Configuration
 
@@ -192,13 +301,14 @@ Each attempt has 10 seconds, covering the whole attempt: connecting, sending, an
 | `dn.WithTimeout(d)` | | 10 s per attempt; must be above 0 |
 | `dn.WithMaxRetries(n)` | | 2; must be 0 or more |
 | `dn.WithHeaders(map)` | | |
+| `dn.WithInlineThreshold(n)` | | 524,288 bytes (`dn.DefaultInlineThreshold`); 0 uploads every local image |
 | `dn.WithHTTPClient(c)` | | a client of its own; yours is copied and never follows redirects, and its transport must be `nil` or an `*http.Transport` that keeps TLS checks on |
 | `dn.WithLogger(l)` | | off |
 | `dn.WithResponseHook(f)` | | off |
 
 An option wins over the environment, and the environment over the default. The base URL must be `https`; plain `http` is accepted only for `localhost`, `127.0.0.1` and `::1`, so the API key never travels unencrypted. `dn.NewClient` does not return an error: an invalid setting is returned by `client.Err()`, and by every call before anything is sent. An empty string counts as not given, for the options and for `Request.Model`. `Request.Model` overrides the client's model for one call. The models are `decisionnode-latest` and `decisionnode-flash-latest`, which move with releases, and the pinned `decisionnode-1.0` and `decisionnode-1.0-flash`.
 
-`dn.WithLogger` takes a `*slog.Logger` and logs each attempt at debug level: method, path, status, request id and timing. State, questions and keys are never logged. The SDK sends no telemetry. Besides `Authorization`, `Accept` and `Content-Type`, the only header it sends is `User-Agent: decisionnode-go/<version>`, plus any you add with `dn.WithHeaders`.
+`dn.WithLogger` takes a `*slog.Logger` and logs each attempt at debug level: method, path, status, request id and timing. State, questions and keys are never logged. The SDK sends no telemetry. Besides `Authorization`, `Accept` and `Content-Type`, the only header it sends is `User-Agent: decisionnode-go/<version>`, plus any you add with `dn.WithHeaders`. An image upload to storage carries exactly the headers the API signed for it: never the key, never your own headers, and no redirect is followed.
 
 `dn.WithResponseHook` calls a function of yours once for every response received, retried ones included, with the method, path, attempt number, status and copies of the headers and the body exactly as sent. It runs with the attempt's context, so values you put in the call's context reach it. Use it to honour a server's `retry-after` across your own work queue, or to keep a response's bytes as received; nothing it does changes what the client returns.
 
@@ -208,7 +318,7 @@ An option wins over the environment, and the environment over the default. The b
 DECISIONNODE_CONFORMANCE_DIR=/path/to/decision-node-conformance go test ./...
 ```
 
-The conformance tests run every case of the DecisionNode conformance suite against its mock server, and need `python3` for that server. `DECISIONNODE_CONFORMANCE_DIR` must point at a checkout of the suite: when it is unset the conformance test fails, it is never skipped. To run only the unit tests, pass `-skip TestConformance`. This version passes conformance suite 1.3; CI checks the suite out at the commit named once, in `CONFORMANCE_REF` in `.github/workflows/ci.yml`, with every action pinned to a commit and no credentials left in the checkouts.
+The conformance tests run every case of the DecisionNode conformance suite against its mock server, and need `python3` for that server. `DECISIONNODE_CONFORMANCE_DIR` must point at a checkout of the suite: when it is unset the conformance test fails, it is never skipped. To run only the unit tests, pass `-skip TestConformance`. This version passes conformance suite 1.4; CI checks the suite out at the commit named once, in `CONFORMANCE_REF` in `.github/workflows/ci.yml`, with every action pinned to a commit and no credentials left in the checkouts.
 
 ## License
 

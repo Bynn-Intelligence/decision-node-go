@@ -4,6 +4,29 @@ All notable changes to this package are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - Unreleased
+
+Implements version 1.1 of the DecisionNode SDK surface: every public call.
+
+### Added
+
+- Number questions: `Number` and `NumberWith` builders (`Min`, `Max` and `Step` on `Question`), `NumberAnswer` with `Number`, `Expected`, `Confidence` and `Probabilities` keyed by value as sent, `Decision.Number`, and the `Client.Number` helper.
+- `Client.Systemone` for `POST /v1/systemone`, which writes truth questions with that path's wire type.
+- Images: `ImageBase64`, `ImageReader` and `ImageUpload`; `Image.MediaType`; `Client.Upload`. Local images are sent inline under `DefaultInlineThreshold` (524,288 bytes, changed with `WithInlineThreshold`) and uploaded at or above it, with one presign per request and the uploads in parallel. Uploads are cached in memory by content hash until 5 minutes before they expire, never uploaded twice at once, and uploaded again once when the server reports one stale.
+- Sessions: `Client.OpenSession`, `Session.Connect`, `Send`, `Next`, `Replies`, `End` and `Close`, the events `Reply`, `FrameError` and `SessionClosed`, and `Client.Supervise`.
+- The Batch API: `Client.Batches` with `Create`, `Add` (split at 10 MiB), `Finalize`, `Get`, `List`, `Results` and `Cancel`, and `Client.RunBatch`.
+- `SessionLimitError`, a `RateLimitError` that is never retried.
+- `ModelInfo` typed fields for the number, upload, session and batch limits.
+- The API's fixed limits as constants: `MaxImages`, `MaxImageBytes`, `MaxImagePixels`, `MaxImageURLChars`, `MaxChoiceOptions`, `MaxScoreLevels`, `MaxNumberGridValues`, `MinPollInterval`, `DefaultPollInterval`, `DefaultBatchTimeout`.
+
+### Changed
+
+- `SpecVersion` is `"1.1"`.
+- Every request is checked locally before anything is sent. A fault in its content (an image's format, size or pixel count, too many images or options or levels, a truth without text, a number grid the API would refuse) is the API's own `*BadRequestError` or `*ValidationError`, with no status and no request id. Image bytes of an unknown format were an argument error before; `ImageFile` no longer refuses a readable file of another format, the call does.
+- An answer of wire type `noul` is read into a `TruthAnswer`.
+- The default transport keeps more idle connections, uses larger buffers, prefers HTTP/2 and resumes TLS sessions.
+- Batch create, add and finalize are retried only on 429 and 529.
+
 ## [0.1.0] - Unreleased
 
 First release. Implements version 1.0 of the DecisionNode SDK surface.
