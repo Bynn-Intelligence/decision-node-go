@@ -202,7 +202,7 @@ for ev := range s.Replies() {
 | Call | Does |
 |---|---|
 | `OpenSession(ctx, dn.SessionRequest)` | `State`, `Questions`, `Instructions`, `Model`, `Window` (frames each answer sees, 1 to 64) and `TTLSeconds` (1 to 3,600), set with `dn.Ptr(16)`; nil leaves a number to the server. Returns a `*Session` with every field of the server's answer, the questions already answered on the fixed part. A key at its limit of open sessions gets a `*SessionLimitError` (also a `*RateLimitError`), never retried. |
-| `s.Connect(ctx)` | Opens the socket. The key travels in the handshake's `Authorization` header, never in the URL. |
+| `s.Connect(ctx)` | Opens the socket, through the proxy, dialer and TLS settings of the client's HTTP transport. The key travels in the handshake's `Authorization` header, never in the URL. |
 | `s.Send(ctx, dn.Frame)` | Sends one frame (`Frame`, `Image`, `Questions`, `Reset`, `Seq`) and returns its `seq`, counted from 1 unless given. It never waits for the reply. A frame the server would refuse for its form (no frame value or image, an empty frame, an unknown question id, a `seq` out of range, an image by URL or over the image rules) returns a `*BadRequestError` with nothing written and no `seq` used. |
 | `s.Next(ctx)`, `s.Replies()` | The events: `*dn.Reply`, `*dn.FrameError` (a value, never an error: the session goes on), and last `*dn.SessionClosed`. Each carries `RawJSON`, the message exactly as the server sent it (a close, which has no JSON, as `{"code", "reason", "reopen"}`). Pings are answered for you. |
 | `s.End(ctx)` | Ends the session. A session already ended is success. |
@@ -238,6 +238,7 @@ It checks every request locally, creates an empty draft, adds the lines in calls
 | `Get(ctx, batchID)` | The `*Batch`: `State`, `Counters`, the times, `Usage`, `Error`. |
 | `List(ctx, dn.BatchListOptions)` | One page of your batches, newest first. `Offset` (0 or more) and `Limit` (1 to 100) are pointers; nil leaves them to the server. |
 | `Results(ctx, batchID)` | One `BatchResult` per line, in upload order: `Decision` for a 200 line, else `Err`, the error that status would give. |
+| `ResultsReader(ctx, batchID)` | The same results read line by line as the file arrives, for files of any size: `for r.Next() { r.Result() }`, then `r.Err()` and `r.Close()`. The client's timeout bounds each pause in the file, not the whole download. |
 | `Cancel(ctx, batchID)` | Cancels the batch. Safe to repeat. |
 
 A request's `CustomID` is a pointer so a missing id and an empty one are told apart: every line needs one, of 1 to 512 characters, unique within the call; a fault is refused locally with the API's message ("Line 2: custom_id \"a\" is already in the batch."). Each line carries its custom id, a model (the request's, else the client's) and a state. A line's local images follow the inline threshold per line. `Create`, `Add` and `Finalize` are retried only on 429 and 529, since a repeat after a lost answer could create a second draft; a `Finalize` answered 409 reads the batch and returns it when an earlier finalize went through.
@@ -297,7 +298,9 @@ The server never sees a request the client could have refused. Every fixed rule 
 | an `https` image URL over 2,048 characters, with user information, on a port other than 443, or naming a private address | `*BadRequestError`, `image_url_refused` |
 | a batch line without a valid or unique `CustomID`, an `Add` with no requests, a `List` page out of range | `*BadRequestError`, `api_usage_error` |
 
-After a call to `Models`, the client also checks the limits only that list states: a model that answers no number questions or serves no sessions, a lower `max_window`, the batch's `requests_per_batch` and `max_custom_id_chars`. In `DecideMany` and a batch, a fault in any request fails the whole call. Token counts and anything that depends on the server's state are left to the API.
+To validate input without sending it, call the check that matches the call: `client.CheckDecide(req)`, `CheckSystemone(req)`, `CheckSession(sessionRequest)`, `CheckBatchCreate(requests)`, `CheckBatchAdd(requests)` or `session.CheckFrame(frame)`. Each runs every local check the call would run, returns the same error, and sends and uploads nothing; nil means the call would send the request.
+
+After a call to `Models`, the client also checks the limits only that list states, for a model named by its entry's name, alias or pinned version: a model that answers no number questions or serves no sessions, a lower `max_window`, the batch's `requests_per_batch` and `max_custom_id_chars`. In `DecideMany` and a batch, a fault in any request fails the whole call. Token counts and anything that depends on the server's state are left to the API.
 
 ## Retries and timeouts
 
@@ -314,6 +317,7 @@ Each attempt has 10 seconds, covering the whole attempt: connecting, sending, an
 | `dn.WithMaxRetries(n)` | | 2; must be 0 or more |
 | `dn.WithHeaders(map)` | | |
 | `dn.WithInlineThreshold(n)` | | 524,288 bytes (`dn.DefaultInlineThreshold`); 0 uploads every local image |
+| `dn.WithUploadTimeout(d)` | | 60 s per storage PUT attempt (`dn.DefaultUploadTimeout`), apart from the API timeout; must be above 0 |
 | `dn.WithHTTPClient(c)` | | a client of its own; yours is copied and never follows redirects, and its transport must be `nil` or an `*http.Transport` that keeps TLS checks on |
 | `dn.WithLogger(l)` | | off |
 | `dn.WithResponseHook(f)` | | off |
@@ -330,7 +334,7 @@ An option wins over the environment, and the environment over the default. The b
 DECISIONNODE_CONFORMANCE_DIR=/path/to/decision-node-conformance go test ./...
 ```
 
-The conformance tests run every case of the DecisionNode conformance suite against its mock server, and need `python3` for that server. `DECISIONNODE_CONFORMANCE_DIR` must point at a checkout of the suite: when it is unset the conformance test fails, it is never skipped. To run only the unit tests, pass `-skip TestConformance`. This version passes conformance suite 1.5; CI checks the suite out at the commit named once, in `CONFORMANCE_REF` in `.github/workflows/ci.yml`, with every action pinned to a commit and no credentials left in the checkouts.
+The conformance tests run every case of the DecisionNode conformance suite against its mock server, and need `python3` for that server. `DECISIONNODE_CONFORMANCE_DIR` must point at a checkout of the suite: when it is unset the conformance test fails, it is never skipped. To run only the unit tests, pass `-skip TestConformance`. This version passes conformance suite 1.6; CI checks the suite out at the commit named once, in `CONFORMANCE_REF` in `.github/workflows/ci.yml`, with every action pinned to a commit and no credentials left in the checkouts.
 
 ## License
 

@@ -23,6 +23,11 @@ Implements version 1.1 of the DecisionNode SDK surface: every public call.
 - `Ptr`, for the optional fields where 0 or "" differs from not given.
 - Every fixed rule the API documents is checked locally, in the server's order, with the error type the server sends: question shapes and types, value types, number grids, nesting, image URLs (`image_url_refused`), session window and lifetime, frames (`Session.Send` writes nothing and uses no seq for a refused frame), batch custom ids and list paging, and, after `Models`, the limits only that list states.
 - An upload refused 403 after its URL's lifetime is presigned again once.
+- Public checks that run every local check of a call and send nothing: `CheckDecide`, `CheckSystemone`, `CheckSession`, `CheckBatchCreate`, `CheckBatchAdd` and `Session.CheckFrame`.
+- `BatchService.ResultsReader` and `BatchResultsReader` read a batch's results line by line as they arrive; `Results` uses it and still returns the whole list.
+- `WithUploadTimeout` (default `DefaultUploadTimeout`, 60 s) bounds each storage PUT attempt apart from the API timeout.
+- `ModelInfo.Version` and `ModelInfo.Alias`. Limits held from `Models` apply to a model named by an entry's name, alias or pinned version.
+- A session's socket is dialled through the proxy, dialer and TLS settings of the client's HTTP transport.
 - The API's fixed limits as constants: `MaxImages`, `MaxImageBytes`, `MaxImagePixels`, `MaxImageURLChars`, `MaxChoiceOptions`, `MaxScoreLevels`, `MaxNumberGridValues`, `MinPollInterval`, `DefaultPollInterval`, `DefaultBatchTimeout`.
 
 ### Changed
