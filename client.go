@@ -3,6 +3,7 @@ package decisionnode
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,7 +44,14 @@ type Client struct {
 	httpClient *http.Client
 	logger     *slog.Logger
 	onResponse func(ctx context.Context, r ResponseInfo)
-	// sleep waits between attempts. Tests replace it to record the waits.
+	// inlineThreshold is the size under which a request's local images go
+	// inline; at or above it they are uploaded.
+	inlineThreshold int
+	// uploads caches uploads by content hash, in memory, for this client only.
+	uploads *uploadCache
+	// sleep waits between attempts, between PUT retries, between RunBatch
+	// polls and before Supervise reopens. Tests replace it to record the
+	// waits.
 	sleep func(ctx context.Context, d time.Duration) error
 	// err is the first configuration problem found by NewClient. Every call
 	// returns it before anything is sent.
@@ -122,6 +130,22 @@ func WithHTTPClient(hc *http.Client) Option { return func(c *Client) { c.httpCli
 // never logged.
 func WithLogger(l *slog.Logger) Option { return func(c *Client) { c.logger = l } }
 
+// WithInlineThreshold sets the size, in bytes, under which the local images
+// of one request (or session frame, or batch line) together are sent inline
+// as base64; at or above it they are uploaded once and named by upload_id.
+// The default is DefaultInlineThreshold (524,288). 0 uploads every local
+// image. A negative value is an argument error, returned by Err and by every
+// call.
+func WithInlineThreshold(n int) Option {
+	return func(c *Client) {
+		if n < 0 {
+			c.fail(fmt.Errorf("decisionnode: the inline threshold must be 0 or more, got %d", n))
+			return
+		}
+		c.inlineThreshold = n
+	}
+}
+
 // ResponseInfo describes one HTTP response the client received, as passed to
 // the function given to WithResponseHook.
 type ResponseInfo struct {
@@ -159,10 +183,12 @@ func WithResponseHook(f func(ctx context.Context, r ResponseInfo)) Option {
 // sent.
 func NewClient(opts ...Option) *Client {
 	c := &Client{
-		timeout:    DefaultTimeout,
-		maxRetries: DefaultMaxRetries,
-		headers:    http.Header{},
-		sleep:      sleep,
+		timeout:         DefaultTimeout,
+		maxRetries:      DefaultMaxRetries,
+		headers:         http.Header{},
+		inlineThreshold: DefaultInlineThreshold,
+		uploads:         newUploadCache(),
+		sleep:           sleep,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -240,8 +266,11 @@ func checkBaseURL(raw string) error {
 }
 
 // defaultTransport is the transport of a client without one of its own: a
-// copy of http.DefaultTransport when that is an *http.Transport, with enough
-// idle connections for DecideMany's default concurrency.
+// copy of http.DefaultTransport when that is an *http.Transport, tuned for
+// throughput: HTTP/2 when the server offers it (many calls share one
+// connection), enough idle HTTP/1.1 connections for wide DecideMany and
+// parallel uploads, larger buffers for image bodies, and TLS session
+// resumption so a new connection costs one round trip less.
 func defaultTransport() *http.Transport {
 	var t *http.Transport
 	if dt, ok := http.DefaultTransport.(*http.Transport); ok {
@@ -256,7 +285,16 @@ func defaultTransport() *http.Transport {
 			ExpectContinueTimeout: time.Second,
 		}
 	}
-	t.MaxIdleConnsPerHost = 2 * DefaultConcurrency
+	t.ForceAttemptHTTP2 = true
+	t.MaxIdleConns = 256
+	t.MaxIdleConnsPerHost = 64
+	t.IdleConnTimeout = 90 * time.Second
+	t.WriteBufferSize = 64 << 10
+	t.ReadBufferSize = 64 << 10
+	t.TLSClientConfig = &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		ClientSessionCache: tls.NewLRUClientSessionCache(64),
+	}
 	return t
 }
 
@@ -280,7 +318,8 @@ func checkTransport(rt http.RoundTripper, baseURL string) error {
 	if t.TLSClientConfig != nil && t.TLSClientConfig.InsecureSkipVerify {
 		return errors.New("decisionnode: the HTTP client's transport turns off certificate checks (InsecureSkipVerify); this is refused for an https base URL")
 	}
-	if t.DialTLS != nil || t.DialTLSContext != nil { //nolint:staticcheck // DialTLS is deprecated but still honoured by net/http.
+	//lint:ignore SA1019 DialTLS is deprecated but still honoured by net/http, so it must be refused too.
+	if t.DialTLS != nil || t.DialTLSContext != nil { //nolint:staticcheck // as above
 		return errors.New("decisionnode: the HTTP client's transport has its own TLS dialer, so its certificate checks cannot be shown; this is refused for an https base URL")
 	}
 	return nil
@@ -299,41 +338,47 @@ func sleep(ctx context.Context, d time.Duration) error {
 }
 
 // Decide sends one request and returns its decision.
+//
+// The request is checked before anything is sent: an empty question list or
+// a value that cannot be encoded is a plain error; content the API would
+// refuse (an image of another format or over the limits, too many options or
+// levels, a number grid that cannot be built) is the API's own error class
+// (*BadRequestError, or *ValidationError where the API answers 422) with no
+// status and no request id. Local images go inline under the inline
+// threshold and are uploaded at or above it.
 func (c *Client) Decide(ctx context.Context, req Request) (*Decision, error) {
-	d, _, err := c.decide(ctx, req)
+	d, _, err := c.decide(ctx, req, "/v1/decide", false)
+	return d, err
+}
+
+// Systemone sends one request to POST /v1/systemone, the strict path: a
+// model is always sent, and a truth question is written with that path's
+// wire type. Its answers read like those of Decide. The path takes truth,
+// choice and score questions; a number question is refused by the server.
+func (c *Client) Systemone(ctx context.Context, req Request) (*Decision, error) {
+	d, _, err := c.decide(ctx, req, "/v1/systemone", true)
 	return d, err
 }
 
 // decide sends one request and returns its decision and the response it was
 // read from.
-func (c *Client) decide(ctx context.Context, req Request) (*Decision, *response, error) {
+func (c *Client) decide(ctx context.Context, req Request, path string, systemone bool) (*Decision, *response, error) {
 	if c.err != nil {
 		return nil, nil, c.err
 	}
-	payload, err := c.prepare(req)
+	p, err := c.prepare(req, systemone, nil)
 	if err != nil {
 		return nil, nil, err
 	}
-	return c.send(ctx, payload)
+	return c.send(ctx, p, path)
 }
 
-// prepare checks a request and encodes it, without sending anything. Every
-// problem it finds is an argument error.
-func (c *Client) prepare(req Request) ([]byte, error) {
-	body, err := buildBody(req, c.model)
-	if err != nil {
-		return nil, err
-	}
-	payload, err := marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("decisionnode: the request cannot be encoded as JSON: %w", err)
-	}
-	return payload, nil
-}
-
-// send posts an encoded decide request and parses the decision.
-func (c *Client) send(ctx context.Context, payload []byte) (*Decision, *response, error) {
-	resp, err := c.doPayload(ctx, http.MethodPost, "/v1/decide", payload)
+// send places a prepared request's images, posts it and parses the
+// decision. A 400 that says an upload the SDK placed went stale drops those
+// uploads from the cache, uploads again and sends once more; this is not
+// counted as a retry.
+func (c *Client) send(ctx context.Context, p *prepared, path string) (*Decision, *response, error) {
+	resp, err := c.sendPlaced(ctx, p, path)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -342,6 +387,29 @@ func (c *Client) send(ctx context.Context, payload []byte) (*Decision, *response
 		return nil, resp, invalidResponse(resp, err)
 	}
 	return d, resp, nil
+}
+
+// sendPlaced places the images of a prepared body and posts it, resending
+// once after a stale upload reference.
+func (c *Client) sendPlaced(ctx context.Context, p *prepared, path string) (*response, error) {
+	for resend := 0; ; resend++ {
+		pl, err := c.placeImages(ctx, p.images, true)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.doPayload(ctx, http.MethodPost, path, p.body(pl.wires))
+		if err != nil && resend == 0 && len(pl.placed) > 0 && staleUpload(err) {
+			c.uploads.drop(pl.placed)
+			continue
+		}
+		return resp, err
+	}
+}
+
+// staleUpload reports a 400 whose upload reference is no longer usable.
+func staleUpload(err error) bool {
+	var br *BadRequestError
+	return errors.As(err, &br) && staleKind[br.ErrorType]
 }
 
 // DecisionResult is the outcome of one request of DecideMany: a decision or
@@ -353,12 +421,15 @@ type DecisionResult struct {
 
 // DecideMany sends each request with Decide, at most concurrency at a time,
 // and returns one result per request in input order. One failure does not
-// stop the others. Pass DefaultConcurrency (8) for the default.
+// stop the others. Pass DefaultConcurrency (8) for the default. Requests
+// share the client's connections and its upload cache, so an image several
+// requests carry is uploaded once.
 //
-// Every request is checked before any is sent: a concurrency below 1 or an
-// invalid request (an empty question list, image bytes of an unknown format,
-// a value that cannot be encoded) is an argument error, returned with no
-// results and nothing sent.
+// Every request is checked before any is sent: a concurrency below 1, an
+// empty question list or a value that cannot be encoded is an argument
+// error; content the API would refuse in any request (an image of another
+// format, too many options) is the API's own error class for the whole call.
+// Either way there are no results and nothing is sent.
 func (c *Client) DecideMany(ctx context.Context, reqs []Request, concurrency int) ([]DecisionResult, error) {
 	if concurrency < 1 {
 		return nil, fmt.Errorf("decisionnode: concurrency must be at least 1, got %d", concurrency)
@@ -366,10 +437,14 @@ func (c *Client) DecideMany(ctx context.Context, reqs []Request, concurrency int
 	if c.err != nil {
 		return nil, c.err
 	}
-	payloads := make([][]byte, len(reqs))
+	payloads := make([]*prepared, len(reqs))
 	for i, req := range reqs {
-		p, err := c.prepare(req)
+		p, err := c.prepare(req, false, nil)
 		if err != nil {
+			var apiErr *Error
+			if errors.As(err, &apiErr) {
+				return nil, err
+			}
 			return nil, fmt.Errorf("decisionnode: request %d: %w", i, err)
 		}
 		payloads[i] = p
@@ -383,7 +458,7 @@ func (c *Client) DecideMany(ctx context.Context, reqs []Request, concurrency int
 		go func(i int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			d, _, err := c.send(ctx, payloads[i])
+			d, _, err := c.send(ctx, payloads[i], "/v1/decide")
 			results[i] = DecisionResult{Decision: d, Err: err}
 		}(i)
 	}
@@ -409,7 +484,7 @@ func (c *Client) Check(ctx context.Context, r CheckRequest) (*TruthAnswer, error
 		Questions: Questions{Q("check", TruthWith(r.Instructions, r.IfTrue, r.IfFalse))},
 		Images:    r.Images,
 		Model:     r.Model,
-	})
+	}, "/v1/decide", false)
 	if err != nil {
 		return nil, err
 	}
@@ -436,7 +511,7 @@ func (c *Client) Classify(ctx context.Context, r ClassifyRequest) (*ChoiceAnswer
 		Questions: Questions{Q("classify", Choice(r.Instructions, r.Options))},
 		Images:    r.Images,
 		Model:     r.Model,
-	})
+	}, "/v1/decide", false)
 	if err != nil {
 		return nil, err
 	}
@@ -463,7 +538,7 @@ func (c *Client) Score(ctx context.Context, r ScoreRequest) (*ScoreAnswer, error
 		Questions: Questions{Q("score", Score(r.Instructions, r.Levels))},
 		Images:    r.Images,
 		Model:     r.Model,
-	})
+	}, "/v1/decide", false)
 	if err != nil {
 		return nil, err
 	}
@@ -471,6 +546,34 @@ func (c *Client) Score(ctx context.Context, r ScoreRequest) (*ScoreAnswer, error
 		return a, nil
 	}
 	return nil, malformedAnswer(resp, d, "score", "score")
+}
+
+// NumberRequest is the input of Number.
+type NumberRequest struct {
+	State        any
+	Instructions any
+	// Min, Max and Step are the grid, any JSON number each; nil leaves a
+	// field out so the server's default applies (0, 255 and 1).
+	Min, Max, Step any
+	Images         []Image
+	Model          string
+}
+
+// Number asks one number question, with the id "number".
+func (c *Client) Number(ctx context.Context, r NumberRequest) (*NumberAnswer, error) {
+	d, resp, err := c.decide(ctx, Request{
+		State:     r.State,
+		Questions: Questions{Q("number", NumberWith(r.Instructions, r.Min, r.Max, r.Step))},
+		Images:    r.Images,
+		Model:     r.Model,
+	}, "/v1/decide", false)
+	if err != nil {
+		return nil, err
+	}
+	if a := d.Number("number"); a != nil {
+		return a, nil
+	}
+	return nil, malformedAnswer(resp, d, "number", "number")
 }
 
 // GateRequest is the input of Gate.
@@ -597,9 +700,35 @@ func (c *Client) do(ctx context.Context, method, path string, body any) (*respon
 	return c.doPayload(ctx, method, path, payload)
 }
 
+// retryPolicy says which failures a call retries.
+type retryPolicy int
+
+const (
+	// retryDefault retries 408, 429, every 5xx, timeouts and connection
+	// errors: the rule of every call that changes nothing, or is safe to
+	// repeat.
+	retryDefault retryPolicy = iota
+	// retryMutation retries only 429 and 529, on which the API applied
+	// nothing: batch create, add and finalize, where a repeat after a lost
+	// answer could create a second draft or refuse repeated custom ids.
+	retryMutation
+)
+
+// callOptions are the per-call settings of call.
+type callOptions struct {
+	policy      retryPolicy
+	contentType string
+}
+
 // doPayload sends an encoded body (nil for none) with retries and returns the
 // successful response.
 func (c *Client) doPayload(ctx context.Context, method, path string, payload []byte) (*response, error) {
+	return c.call(ctx, method, path, payload, callOptions{})
+}
+
+// call sends an encoded body (nil for none) with the retries of its policy
+// and returns the successful response.
+func (c *Client) call(ctx context.Context, method, path string, payload []byte, o callOptions) (*response, error) {
 	if c.err != nil {
 		return nil, c.err
 	}
@@ -607,11 +736,11 @@ func (c *Client) doPayload(ctx context.Context, method, path string, payload []b
 		return nil, &AuthenticationError{&Error{msg: "no API key: pass WithAPIKey or set DECISIONNODE_API_KEY"}}
 	}
 	for attempt := 0; ; attempt++ {
-		resp, header, err := c.attempt(ctx, method, path, payload, attempt)
+		resp, header, err := c.attempt(ctx, method, path, payload, o.contentType, attempt)
 		if err == nil {
 			return resp, nil
 		}
-		if ctx.Err() != nil || attempt >= c.maxRetries || !retryable(err) {
+		if ctx.Err() != nil || attempt >= c.maxRetries || !retryable(err, o.policy) {
 			return nil, err
 		}
 		wait := backoff(attempt)
@@ -626,7 +755,7 @@ func (c *Client) doPayload(ctx context.Context, method, path string, payload []b
 	}
 }
 
-func (c *Client) attempt(ctx context.Context, method, path string, payload []byte, attempt int) (*response, http.Header, error) {
+func (c *Client) attempt(ctx context.Context, method, path string, payload []byte, contentType string, attempt int) (*response, http.Header, error) {
 	// One deadline for the whole attempt: connecting, sending, the response
 	// headers and every byte of the body.
 	actx, cancel := context.WithTimeout(ctx, c.timeout)
@@ -644,7 +773,10 @@ func (c *Client) attempt(ctx context.Context, method, path string, payload []byt
 	req.Header.Set("User-Agent", UserAgent)
 	req.Header.Set("Accept", "application/json")
 	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
+		if contentType == "" {
+			contentType = "application/json"
+		}
+		req.Header.Set("Content-Type", contentType)
 	}
 	for k, vs := range c.headers {
 		req.Header[k] = append([]string(nil), vs...)
@@ -712,16 +844,25 @@ func (c *Client) log(ctx context.Context, method, path string, status int, reque
 	c.logger.DebugContext(ctx, "decisionnode request", attrs...)
 }
 
-// retryable reports whether an error is worth another attempt: 408, 429,
-// every 5xx, timeouts and connection errors.
-func retryable(err error) bool {
+// retryable reports whether an error is worth another attempt under a
+// policy. By default: 408, 429, every 5xx, timeouts and connection errors.
+// For a mutation: 429 and 529 only. A 429 session_limit_exceeded never: the
+// count frees when a session ends, not when time passes.
+func retryable(err error, policy retryPolicy) bool {
+	var sl *SessionLimitError
+	if errors.As(err, &sl) {
+		return false
+	}
 	var te *TimeoutError
 	var ce *ConnectionError
 	if errors.As(err, &te) || errors.As(err, &ce) {
-		return true
+		return policy == retryDefault
 	}
 	var e *Error
 	if errors.As(err, &e) {
+		if policy == retryMutation {
+			return e.Status == 429 || e.Status == 529
+		}
 		return e.Status == 408 || e.Status == 429 || (e.Status >= 500 && e.Status <= 599)
 	}
 	return false

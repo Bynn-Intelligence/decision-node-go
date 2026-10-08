@@ -122,6 +122,21 @@ type RateLimitError struct {
 
 func (e *RateLimitError) Unwrap() error { return e.errorBase }
 
+// SessionLimitError is a 429 with error_type session_limit_exceeded: the key
+// already holds as many open sessions as it may. It is never retried, since
+// the count frees when a session ends, not when time passes. It is also a
+// *RateLimitError.
+type SessionLimitError struct {
+	*errorBase
+	// RetryAfter is the wait the server named, capped at 60 s. Zero when the
+	// server sent none.
+	RetryAfter time.Duration
+}
+
+func (e *SessionLimitError) Unwrap() error {
+	return &RateLimitError{errorBase: e.errorBase, RetryAfter: e.RetryAfter}
+}
+
 // OverloadedError is a 529: the service is busy. It is retried by default.
 type OverloadedError struct {
 	*errorBase
@@ -196,6 +211,9 @@ func newError(status int, header http.Header, body []byte) error {
 		return &NotFoundError{base}
 	case status == 422:
 		return &ValidationError{errorBase: base, Entries: entries}
+	case status == 429 && base.ErrorType == "session_limit_exceeded":
+		wait, _ := retryAfter(header)
+		return &SessionLimitError{errorBase: base, RetryAfter: wait}
 	case status == 429:
 		wait, _ := retryAfter(header)
 		return &RateLimitError{errorBase: base, RetryAfter: wait}
@@ -247,4 +265,18 @@ func retryAfterHeader(header http.Header) (time.Duration, bool) {
 		}
 	}
 	return 0, false
+}
+
+// localBadRequest is the error for a request whose content breaks a fixed
+// rule of the API, found before anything is sent: the class, error_type and
+// message the API itself would answer with, but no status and no request id.
+func localBadRequest(errorType, message, reason string) error {
+	return &BadRequestError{&Error{ErrorType: errorType, Reason: reason, msg: message}}
+}
+
+// localValidation is the local form of a 422: entries in the API's shape, the
+// reason in words, no status and no request id. Its message is the reason, so
+// the error says what is wrong.
+func localValidation(reason string, entries ...any) error {
+	return &ValidationError{errorBase: &Error{Reason: reason, msg: reason}, Entries: entries}
 }

@@ -2,11 +2,8 @@ package decisionnode
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
 	"reflect"
 	"sort"
 )
@@ -77,15 +74,20 @@ func (qs Questions) MarshalJSON() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// Question is a question built by Truth, TruthWith, Choice or Score.
+// Question is a question built by Truth, TruthWith, Choice, Score, Number or
+// NumberWith.
 type Question struct {
-	// Type is "truth", "choice" or "score".
+	// Type is "truth", "choice", "score" or "number".
 	Type string
 	// Instructions says what to decide: a string or any JSON value. Nil leaves
 	// it out.
 	Instructions any
 	// Criteria is the wire form of the options, levels or truth criteria.
 	Criteria any
+	// Min, Max and Step are a number question's grid: any JSON number (an
+	// int, a float64, a json.Number). Nil leaves the field out, so the
+	// server's default applies: 0, 255 and 1.
+	Min, Max, Step any
 
 	hasCriteria bool
 }
@@ -107,6 +109,17 @@ func (q Question) MarshalJSON() ([]byte, error) {
 		buf.WriteByte(',')
 		if err := writeMember(&buf, "criteria", q.Criteria); err != nil {
 			return nil, err
+		}
+	}
+	for _, f := range []struct {
+		name  string
+		value any
+	}{{"min", q.Min}, {"max", q.Max}, {"step", q.Step}} {
+		if f.value != nil {
+			buf.WriteByte(',')
+			if err := writeMember(&buf, f.name, f.value); err != nil {
+				return nil, err
+			}
 		}
 	}
 	buf.WriteByte('}')
@@ -152,6 +165,23 @@ func Score(instructions any, levels any) Question {
 		crit = []any{}
 	}
 	return Question{Type: "score", Instructions: instructions, Criteria: crit, hasCriteria: true}
+}
+
+// Number builds a number question on the default grid, the whole numbers 0
+// to 255: the probability of each value, the most likely one, and the
+// expected value.
+func Number(instructions any) Question {
+	return Question{Type: "number", Instructions: instructions}
+}
+
+// NumberWith builds a number question on the grid min, min+step, ... up to
+// max. Each of min, max and step is any JSON number (an int, a float64, a
+// json.Number for an exact decimal), or nil to leave it out so the server's
+// default applies (0, 255 and 1). A grid holds at most 4,096 values; min and
+// step have at most 6 decimals. A grid the API would refuse is refused
+// locally with a *ValidationError, before anything is sent.
+func NumberWith(instructions, min, max, step any) Question {
+	return Question{Type: "number", Instructions: instructions, Min: min, Max: max, Step: step}
 }
 
 // Options is an ordered set of choice options, sent in this order.
@@ -209,123 +239,6 @@ func choiceCriteria(options any) any {
 		return out
 	}
 	return options
-}
-
-// Image is an image sent beside the state. Build it with ImageFile,
-// ImageData or ImageURL.
-type Image struct {
-	id        string
-	data      []byte
-	mediaType string
-	url       string
-}
-
-// ImageFile reads an image file now, when the Image is made, so an unreadable
-// file fails here rather than at the call. The media type is taken from the
-// file's first bytes: JPEG, PNG or WebP; any other format is an error.
-func ImageFile(id, path string) (Image, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return Image{}, fmt.Errorf("decisionnode: image %q: %w", id, err)
-	}
-	mediaType := sniffMediaType(data)
-	if mediaType == "" {
-		return Image{}, fmt.Errorf("decisionnode: image %q is not a JPEG, PNG or WebP image", id)
-	}
-	return Image{id: id, data: data, mediaType: mediaType}, nil
-}
-
-// ImageData sends image bytes. An empty mediaType is taken from the bytes'
-// first bytes (JPEG, PNG or WebP); bytes of any other format make the call
-// fail with an argument error before anything is sent.
-func ImageData(id string, data []byte, mediaType string) Image {
-	return Image{id: id, data: data, mediaType: mediaType}
-}
-
-// ImageURL sends an https URL for the server to fetch.
-func ImageURL(id, url string) Image { return Image{id: id, url: url} }
-
-// ID returns the image's id.
-func (img Image) ID() string { return img.id }
-
-func (img Image) wire() (map[string]any, error) {
-	if img.url != "" {
-		return map[string]any{"id": img.id, "url": img.url}, nil
-	}
-	mediaType := img.mediaType
-	if mediaType == "" {
-		mediaType = sniffMediaType(img.data)
-		if mediaType == "" {
-			return nil, fmt.Errorf("decisionnode: image %q is not a JPEG, PNG or WebP image", img.id)
-		}
-	}
-	return map[string]any{"id": img.id, "media_type": mediaType, "data": base64.StdEncoding.EncodeToString(img.data)}, nil
-}
-
-func sniffMediaType(b []byte) string {
-	switch {
-	case len(b) >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF:
-		return "image/jpeg"
-	case len(b) >= 8 && bytes.Equal(b[:8], []byte("\x89PNG\r\n\x1a\n")):
-		return "image/png"
-	case len(b) >= 12 && bytes.Equal(b[:4], []byte("RIFF")) && bytes.Equal(b[8:12], []byte("WEBP")):
-		return "image/webp"
-	}
-	return ""
-}
-
-// wireImage keeps the key order id, media_type, data on the wire.
-type wireImage map[string]any
-
-func (w wireImage) MarshalJSON() ([]byte, error) {
-	var buf bytes.Buffer
-	buf.WriteByte('{')
-	n := 0
-	for _, k := range []string{"id", "media_type", "data", "url"} {
-		v, ok := w[k]
-		if !ok {
-			continue
-		}
-		if n > 0 {
-			buf.WriteByte(',')
-		}
-		if err := writeMember(&buf, k, v); err != nil {
-			return nil, err
-		}
-		n++
-	}
-	buf.WriteByte('}')
-	return buf.Bytes(), nil
-}
-
-// requestBody is the wire form of a decide request, in this key order.
-type requestBody struct {
-	Model     string      `json:"model"`
-	State     any         `json:"state"`
-	Questions Questions   `json:"questions"`
-	Images    []wireImage `json:"images,omitempty"`
-}
-
-func buildBody(req Request, model string) (*requestBody, error) {
-	if len(req.Questions) == 0 {
-		return nil, errors.New("decisionnode: questions must hold at least one question")
-	}
-	if req.Model != "" {
-		model = req.Model
-	}
-	state := req.State
-	if state == nil {
-		state = ""
-	}
-	body := &requestBody{Model: model, State: state, Questions: req.Questions}
-	for _, img := range req.Images {
-		w, err := img.wire()
-		if err != nil {
-			return nil, err
-		}
-		body.Images = append(body.Images, wireImage(w))
-	}
-	return body, nil
 }
 
 // marshal encodes v as compact JSON without escaping <, > and &.

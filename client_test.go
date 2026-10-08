@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -199,14 +200,22 @@ func TestFailsBeforeSending(t *testing.T) {
 		t.Fatalf("missing image file: got %v", err)
 	}
 
+	// Spec 1.1: a file is read when the Image is made, and its format is
+	// checked at the call, where another format is the API's own
+	// *BadRequestError, with no status and no request id.
 	gif := filepath.Join(t.TempDir(), "a.gif")
 	_ = os.WriteFile(gif, []byte("GIF89a...."), 0o600)
-	if _, err := dn.ImageFile("x", gif); err == nil || errors.As(err, &base) {
-		t.Fatalf("unsupported image file: got %v", err)
+	gifImage, err := dn.ImageFile("x", gif)
+	if err != nil {
+		t.Fatalf("a readable file: got %v", err)
 	}
-
+	var bad *dn.BadRequestError
+	_, err = c.Decide(ctx, dn.Request{Questions: oneTruth(), Images: []dn.Image{gifImage}})
+	if !errors.As(err, &bad) || bad.Status != 0 || bad.RequestID != "" || bad.ErrorType != "api_usage_error" {
+		t.Fatalf("unsupported image file: got %#v", err)
+	}
 	_, err = c.Decide(ctx, dn.Request{Questions: oneTruth(), Images: []dn.Image{dn.ImageData("x", []byte("GIF89a...."), "")}})
-	if err == nil || errors.As(err, &base) {
+	if !errors.As(err, &bad) {
 		t.Fatalf("unsupported image bytes: got %v", err)
 	}
 
@@ -219,22 +228,38 @@ func TestFailsBeforeSending(t *testing.T) {
 	}
 }
 
+func fixture(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 func TestImages(t *testing.T) {
 	srv, rec := server(t, func(w http.ResponseWriter, r *http.Request, n int) { respond(w, 200, truthBody, nil) })
 	png := filepath.Join(t.TempDir(), "p")
-	_ = os.WriteFile(png, []byte("\x89PNG\r\n\x1a\nxyz"), 0o600)
+	pngBytes := fixture(t, "3x2.png")
+	_ = os.WriteFile(png, pngBytes, 0o600)
 	fileImage, err := dn.ImageFile("file", png)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// The file is read when the Image is made: removing it now changes nothing.
 	_ = os.Remove(png)
+	jpg := fixture(t, "3x2.jpg")
+	webp := fixture(t, "3x2-lossless.webp")
+	b64, err := dn.ImageBase64("b64", base64.StdEncoding.EncodeToString(webp), "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, err = client(t, srv.URL).Decide(context.Background(), dn.Request{
 		Questions: oneTruth(),
 		Images: []dn.Image{
 			fileImage,
-			dn.ImageData("bytes", []byte{0xff, 0xd8, 0xff, 0x00}, ""),
-			dn.ImageData("typed", []byte("x"), "image/webp"),
+			dn.ImageData("bytes", jpg, ""),
+			b64,
 			dn.ImageURL("remote", "https://example.com/r.jpg"),
 		},
 	})
@@ -246,9 +271,9 @@ func TestImages(t *testing.T) {
 	}
 	_ = json.Unmarshal(rec.bodies[0], &body)
 	want := []map[string]string{
-		{"id": "file", "media_type": "image/png", "data": "iVBORw0KGgp4eXo="},
-		{"id": "bytes", "media_type": "image/jpeg", "data": "/9j/AA=="},
-		{"id": "typed", "media_type": "image/webp", "data": "eA=="},
+		{"id": "file", "media_type": "image/png", "data": base64.StdEncoding.EncodeToString(pngBytes)},
+		{"id": "bytes", "media_type": "image/jpeg", "data": base64.StdEncoding.EncodeToString(jpg)},
+		{"id": "b64", "media_type": "image/webp", "data": base64.StdEncoding.EncodeToString(webp)},
 		{"id": "remote", "url": "https://example.com/r.jpg"},
 	}
 	if len(body.Images) != len(want) {
@@ -648,7 +673,10 @@ func TestDecideManyChecksEveryRequestFirst(t *testing.T) {
 			reqs := []dn.Request{{State: "a", Questions: oneTruth()}, {State: "b", Questions: oneTruth()}, bad}
 			res, err := client(t, srv.URL).DecideMany(context.Background(), reqs, 1)
 			var apiErr *dn.Error
-			if err == nil || errors.As(err, &apiErr) || res != nil {
+			// Spec 1.1: a request-content fault is the API's own class for
+			// the whole call; argument problems stay plain errors.
+			var bad *dn.BadRequestError
+			if wantAPI := name == "unknown image"; err == nil || res != nil || errors.As(err, &apiErr) != wantAPI || (wantAPI && !errors.As(err, &bad)) {
 				t.Fatalf("got %v, %v", res, err)
 			}
 			if rec.count() != 0 {

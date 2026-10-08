@@ -37,8 +37,8 @@ type Usage struct {
 }
 
 // Answer is one answer of a Decision: a *TruthAnswer, a *ChoiceAnswer, a
-// *ScoreAnswer, or an *UnknownAnswer for a question type this version of the
-// package does not know.
+// *ScoreAnswer, a *NumberAnswer, or an *UnknownAnswer for a question type
+// this version of the package does not know.
 type Answer interface {
 	// Type is the answer's type as sent by the server: "truth", "choice", "score", ...
 	Type() string
@@ -54,11 +54,29 @@ type answerBase struct {
 func (a answerBase) Type() string        { return a.typ }
 func (a answerBase) Raw() map[string]any { return a.raw }
 
-// TruthAnswer answers a truth question.
+// TruthAnswer answers a truth question. An answer the server sent with the
+// wire type "noul" (every /v1/systemone truth answer, and the answer to a
+// question sent as "noul") is a TruthAnswer too, its value read from that
+// field; Type then returns "noul".
 type TruthAnswer struct {
 	answerBase
 	// Truth is the probability, 0 to 1, that the statement is true.
 	Truth float64 `json:"truth"`
+}
+
+// NumberAnswer answers a number question.
+type NumberAnswer struct {
+	answerBase
+	// Number is the most likely value of the grid, exactly as sent.
+	Number float64 `json:"number"`
+	// Expected is the probability-weighted mean over the whole grid.
+	Expected float64 `json:"expected"`
+	// Confidence is the probability of Number.
+	Confidence float64 `json:"confidence"`
+	// Probabilities holds the listed values' probabilities, keyed by the
+	// value exactly as the server wrote it ("7", "3.5"). Values at 0.001 or
+	// below are left out, so the list may sum to less than 1.
+	Probabilities map[string]float64 `json:"probabilities"`
 }
 
 // ChoiceAnswer answers a choice question.
@@ -112,6 +130,12 @@ func (d *Decision) Score(id string) *ScoreAnswer {
 	return a
 }
 
+// Number returns the answer to the given question when it is a number answer, else nil.
+func (d *Decision) Number(id string) *NumberAnswer {
+	a, _ := d.Answers[id].(*NumberAnswer)
+	return a
+}
+
 // Safety is what the hosted API's safety check found for a request.
 type Safety struct {
 	// Checked is false when the check did not run; Reason then says why.
@@ -127,6 +151,9 @@ type Safety struct {
 	Flagged []string
 	// Reason is the code given when the check did not run.
 	Reason string
+	// Blocked names the category a session frame was refused for, from the
+	// body form of the check. Empty otherwise.
+	Blocked string
 }
 
 // ModelInfo is one entry of the model list.
@@ -134,10 +161,60 @@ type ModelInfo struct {
 	Name        string
 	Description string
 	ReleaseDate string
-	// Limits holds every other field of the entry: the model's published limits.
+	// Limits holds every other field of the entry: the model's published
+	// limits, the objects sessions and batch included. The typed fields below
+	// read the best-known of them; a field the server did not send is nil.
 	Limits map[string]any
 	// Raw is the entry as sent by the server.
 	Raw map[string]any
+
+	// NumberOneQuestionValues is the most grid values answered as one question.
+	NumberOneQuestionValues *int
+	// NumberMaxGridValues is the most values a number grid may hold.
+	NumberMaxGridValues *int
+	// NumberDefaultRange is min and max when a number question leaves them out.
+	NumberDefaultRange []float64
+	// NumberDefaultStep is step when a number question leaves it out.
+	NumberDefaultStep *float64
+	// UploadMaxBytes is the largest upload.
+	UploadMaxBytes *int64
+	// UploadTTLSeconds is how long an upload may be named after its presign.
+	UploadTTLSeconds *int
+	// UploadMediaTypes are the media types an upload may have.
+	UploadMediaTypes []string
+	// Sessions holds the model's session limits.
+	Sessions *ModelSessions
+	// Batch holds the model's Batch API limits.
+	Batch *ModelBatch
+}
+
+// ModelSessions is the sessions object of a model entry.
+type ModelSessions struct {
+	Enabled            bool `json:"enabled"`
+	MaxPerKey          int  `json:"max_per_key"`
+	DefaultWindow      int  `json:"default_window"`
+	MaxWindow          int  `json:"max_window"`
+	DefaultTTLSeconds  int  `json:"default_ttl_seconds"`
+	MaxTTLSeconds      int  `json:"max_ttl_seconds"`
+	IdleTimeoutSeconds int  `json:"idle_timeout_seconds"`
+	MaxFrameTokens     int  `json:"max_frame_tokens"`
+	MaxFrameImages     int  `json:"max_frame_images"`
+	WindowTokens       int  `json:"window_tokens"`
+	MaxPrefixTokens    int  `json:"max_prefix_tokens"`
+}
+
+// ModelBatch is the batch object of a model entry.
+type ModelBatch struct {
+	RequestsPerBatch           int     `json:"requests_per_batch"`
+	BatchBytes                 int64   `json:"batch_bytes"`
+	AddBytes                   int64   `json:"add_bytes"`
+	ActiveBatchesPerKey        int     `json:"active_batches_per_key"`
+	QueuedRequestsPerKey       int     `json:"queued_requests_per_key"`
+	TimeToCompletionHours      int     `json:"time_to_completion_hours"`
+	ResultRetentionDays        int     `json:"result_retention_days"`
+	MaxCustomIDChars           int     `json:"max_custom_id_chars"`
+	PricePerMillionInputTokens float64 `json:"price_per_million_input_tokens"`
+	PriceFactor                float64 `json:"price_factor"`
 }
 
 func parseDecision(body []byte, header http.Header) (*Decision, error) {
@@ -191,6 +268,18 @@ func parseAnswer(data json.RawMessage) Answer {
 			return unknown
 		}
 		return a
+	case "noul":
+		v, ok := raw["noul"].(float64)
+		if !ok {
+			return unknown
+		}
+		return &TruthAnswer{answerBase: base, Truth: v}
+	case "number":
+		a := &NumberAnswer{answerBase: base}
+		if !hasFields(raw, "number", "expected", "confidence", "probabilities") || json.Unmarshal(data, a) != nil {
+			return unknown
+		}
+		return a
 	case "choice":
 		a := &ChoiceAnswer{answerBase: base}
 		if !hasFields(raw, "choice", "confidence", "probabilities") || json.Unmarshal(data, a) != nil {
@@ -240,9 +329,88 @@ func parseModels(body []byte) ([]ModelInfo, error) {
 				m.Limits[k] = v
 			}
 		}
+		m.NumberOneQuestionValues = intField(entry, "number_one_question_values")
+		m.NumberMaxGridValues = intField(entry, "number_max_grid_values")
+		if r, ok := entry["number_default_range"].([]any); ok {
+			for _, x := range r {
+				if f, ok := x.(float64); ok {
+					m.NumberDefaultRange = append(m.NumberDefaultRange, f)
+				}
+			}
+		}
+		if f, ok := entry["number_default_step"].(float64); ok {
+			m.NumberDefaultStep = &f
+		}
+		if f, ok := entry["upload_max_bytes"].(float64); ok {
+			n := int64(f)
+			m.UploadMaxBytes = &n
+		}
+		m.UploadTTLSeconds = intField(entry, "upload_ttl_seconds")
+		if ts, ok := entry["upload_media_types"].([]any); ok {
+			for _, x := range ts {
+				if t, ok := x.(string); ok {
+					m.UploadMediaTypes = append(m.UploadMediaTypes, t)
+				}
+			}
+		}
+		if obj, ok := entry["sessions"].(map[string]any); ok {
+			m.Sessions = &ModelSessions{}
+			remarshal(obj, m.Sessions)
+		}
+		if obj, ok := entry["batch"].(map[string]any); ok {
+			m.Batch = &ModelBatch{}
+			remarshal(obj, m.Batch)
+		}
 		out = append(out, m)
 	}
 	return out, nil
+}
+
+func intField(m map[string]any, key string) *int {
+	f, ok := m[key].(float64)
+	if !ok {
+		return nil
+	}
+	n := int(f)
+	return &n
+}
+
+// remarshal fills a typed struct from a parsed object, ignoring fields of
+// the wrong type.
+func remarshal(from any, to any) {
+	b, err := json.Marshal(from)
+	if err == nil {
+		_ = json.Unmarshal(b, to)
+	}
+}
+
+// parseSafetyBody reads the body form of the safety check (session open
+// responses, replies and refused frames): checked, harm, self_harm, flagged,
+// reason and, on a refused frame, blocked.
+func parseSafetyBody(v any) *Safety {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	s := &Safety{Scores: map[string]float64{}, Flagged: []string{}}
+	s.Checked, _ = m["checked"].(bool)
+	s.Reason, _ = m["reason"].(string)
+	s.Blocked, _ = m["blocked"].(string)
+	for k, x := range m {
+		if f, ok := x.(float64); ok {
+			s.Scores[k] = f
+		}
+	}
+	s.Harm = s.Scores["harm"]
+	s.SelfHarm = s.Scores["self_harm"]
+	if fl, ok := m["flagged"].([]any); ok {
+		for _, x := range fl {
+			if name, ok := x.(string); ok {
+				s.Flagged = append(s.Flagged, name)
+			}
+		}
+	}
+	return s
 }
 
 // parseSafety reads the x-decisionnode-safety header: a list of name=value
