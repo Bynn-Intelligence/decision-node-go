@@ -3,6 +3,7 @@ package decisionnode
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -77,9 +78,18 @@ func TestCheckImage(t *testing.T) {
 	if err := checkImage(ImageData("ok", png, "image/png"), limits{}); err != nil {
 		t.Fatal(err)
 	}
-	five := []Image{ImageURL("a", "https://x/a"), ImageURL("b", "https://x/b"), ImageURL("c", "https://x/c"), ImageURL("d", "https://x/d"), ImageURL("e", "https://x/e")}
-	if err := checkImages(five, limits{}); err == nil {
-		t.Fatal("five images accepted")
+	var seventeen []Image
+	for i := 0; i < 17; i++ {
+		seventeen = append(seventeen, ImageURL(fmt.Sprint(i), "https://x/a"))
+	}
+	if err := checkImages(seventeen[:16], limits{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkImages(seventeen, limits{}); err == nil {
+		t.Fatal("seventeen images accepted")
+	}
+	if err := checkImages(seventeen[:5], limits{maxImages: 4}); err == nil {
+		t.Fatal("five images accepted under a held limit of 4")
 	}
 	if err := checkImages([]Image{ImageURL("a", "https://x/a"), ImageURL("a", "https://x/b")}, limits{}); err == nil {
 		t.Fatal("a repeated id accepted")
@@ -262,5 +272,27 @@ func TestJSONDepth(t *testing.T) {
 		if got := jsonDepth([]byte(in)); got != want {
 			t.Errorf("%s: depth %d, want %d", in, got, want)
 		}
+	}
+}
+
+func TestHeldImageAndVideoLimits(t *testing.T) {
+	if l := limitsOf("m", ModelInfo{Raw: map[string]any{}}); l.maxImages != 0 || l.maxVideos != 0 {
+		t.Fatalf("%+v", l)
+	}
+	l := limitsOf("m", ModelInfo{Raw: map[string]any{
+		"images": map[string]any{"max_images": float64(8), "max_image_bytes": float64(1024)},
+		"videos": map[string]any{"max_videos": float64(2)},
+	}})
+	if l.maxImages != 8 || l.maxImageBytes != 1024 || l.maxVideos != 2 {
+		t.Fatalf("%+v", l)
+	}
+	if l := limitsOf("m", ModelInfo{Raw: map[string]any{"max_images": float64(4), "images": map[string]any{"max_images": float64(8)}}}); l.maxImages != 4 {
+		t.Fatalf("the top-level limit first: %+v", l)
+	}
+	if got := decimal(1696789012.5); got != "1.69679e+09" {
+		t.Fatal(got)
+	}
+	if got := pyRepr("it's"); got != `"it's"` {
+		t.Fatal(got)
 	}
 }

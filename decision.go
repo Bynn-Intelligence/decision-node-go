@@ -23,17 +23,27 @@ type Decision struct {
 	// Safety is what the safety check found, from the x-decisionnode-safety
 	// header. Nil when the server sent no such header (a self-hosted server).
 	Safety *Safety
+	// Warnings are the server's notes on a request with videos, exactly as
+	// sent: one when it read a video at a lower rate or resolution than
+	// asked. Empty, never nil, when there are none.
+	Warnings []string
 	// Raw is the parsed response body.
 	Raw map[string]any
 	// Header holds the response headers.
 	Header http.Header
 }
 
-// Usage is the token count of a request. A count the server did not send is
-// nil, never 0.
+// Usage is the token count of a request and, for a request with videos, what
+// was read of them. A value the server did not send is nil, never 0.
 type Usage struct {
 	InputTokens  *int `json:"input_tokens"`
 	OutputTokens *int `json:"output_tokens"`
+	// VideoFrames is the number of frames read over all the videos. Nil for
+	// a request without videos.
+	VideoFrames *int `json:"video_frames"`
+	// VideoSeconds is the seconds of the videos' windows read, summed, as
+	// sent. Nil for a request without videos.
+	VideoSeconds *float64 `json:"video_seconds"`
 }
 
 // Answer is one answer of a Decision: a *TruthAnswer, a *ChoiceAnswer, a
@@ -242,8 +252,16 @@ func parseDecision(body []byte, header http.Header) (*Decision, error) {
 		Usage:     shape.Usage,
 		RequestID: header.Get("x-request-id"),
 		Safety:    parseSafety(header.Values("x-decisionnode-safety")),
+		Warnings:  []string{},
 		Raw:       raw,
 		Header:    header,
+	}
+	if list, ok := raw["warnings"].([]any); ok {
+		for _, w := range list {
+			if s, ok := w.(string); ok {
+				d.Warnings = append(d.Warnings, s)
+			}
+		}
 	}
 	if v := strings.TrimSpace(header.Get("x-decisionnode-latency-ms")); v != "" {
 		if ms, err := strconv.ParseFloat(v, 64); err == nil {

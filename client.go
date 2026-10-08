@@ -505,6 +505,7 @@ type CheckRequest struct {
 	IfTrue  any
 	IfFalse any
 	Images  []Image
+	Videos  []any
 	Model   string
 }
 
@@ -514,6 +515,7 @@ func (c *Client) Check(ctx context.Context, r CheckRequest) (*TruthAnswer, error
 		State:     r.State,
 		Questions: Questions{Q("check", TruthWith(r.Instructions, r.IfTrue, r.IfFalse))},
 		Images:    r.Images,
+		Videos:    r.Videos,
 		Model:     r.Model,
 	}, "/v1/decide", false)
 	if err != nil {
@@ -532,6 +534,7 @@ type ClassifyRequest struct {
 	// Options is Options, a map of name to description, or a slice of names.
 	Options any
 	Images  []Image
+	Videos  []any
 	Model   string
 }
 
@@ -541,6 +544,7 @@ func (c *Client) Classify(ctx context.Context, r ClassifyRequest) (*ChoiceAnswer
 		State:     r.State,
 		Questions: Questions{Q("classify", Choice(r.Instructions, r.Options))},
 		Images:    r.Images,
+		Videos:    r.Videos,
 		Model:     r.Model,
 	}, "/v1/decide", false)
 	if err != nil {
@@ -559,6 +563,7 @@ type ScoreRequest struct {
 	// Levels is a slice of levels, low to high.
 	Levels any
 	Images []Image
+	Videos []any
 	Model  string
 }
 
@@ -568,6 +573,7 @@ func (c *Client) Score(ctx context.Context, r ScoreRequest) (*ScoreAnswer, error
 		State:     r.State,
 		Questions: Questions{Q("score", Score(r.Instructions, r.Levels))},
 		Images:    r.Images,
+		Videos:    r.Videos,
 		Model:     r.Model,
 	}, "/v1/decide", false)
 	if err != nil {
@@ -587,6 +593,7 @@ type NumberRequest struct {
 	// field out so the server's default applies (0, 255 and 1).
 	Min, Max, Step any
 	Images         []Image
+	Videos         []any
 	Model          string
 }
 
@@ -596,6 +603,7 @@ func (c *Client) Number(ctx context.Context, r NumberRequest) (*NumberAnswer, er
 		State:     r.State,
 		Questions: Questions{Q("number", NumberWith(r.Instructions, r.Min, r.Max, r.Step))},
 		Images:    r.Images,
+		Videos:    r.Videos,
 		Model:     r.Model,
 	}, "/v1/decide", false)
 	if err != nil {
@@ -614,6 +622,7 @@ type GateRequest struct {
 	// Context is anything that helps judge it. Nil leaves it out.
 	Context any
 	Images  []Image
+	Videos  []any
 	Model   string
 }
 
@@ -622,7 +631,7 @@ type GateRequest struct {
 // (a choice of allow, confirm or block).
 func (c *Client) Gate(ctx context.Context, r GateRequest) (*Decision, error) {
 	state := gateState{Action: r.Action, Context: r.Context}
-	return c.Decide(ctx, Request{State: state, Questions: GateQuestions(), Images: r.Images, Model: r.Model})
+	return c.Decide(ctx, Request{State: state, Questions: GateQuestions(), Images: r.Images, Videos: r.Videos, Model: r.Model})
 }
 
 type gateState struct {

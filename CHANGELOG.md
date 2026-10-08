@@ -4,6 +4,23 @@ All notable changes to this package are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - Unreleased
+
+Implements version 1.2 of the DecisionNode SDK surface: sixteen images and videos as frames.
+
+### Added
+
+- Videos sent as the frames the caller sampled: `Video` (`ID`, `Frames`, and the optional `FPS`, `Start` and `End`), `VideoFrame` built with `VideoFrameData` (bytes, the media type taken from the first bytes when not given) and `VideoFrameBase64` (base64 text sent as given), and `Request.Videos`, which also takes a video in its JSON wire form. `Systemone`, the helper requests, `DecideMany`, batch requests and `CheckDecide` take videos as `Decide` does. Frames always go inline: they are never uploaded, cached, resized or re-encoded.
+- The API's video rules are checked before anything is sent, with the API's own message: at most 4 videos, an id that is present and unique across images and videos, at least one frame, frame times at least 0 and strictly increasing, a JPEG, PNG or WebP media type for every frame, `FPS` above 0 and at most 4, `Start` and `End` at least 0 and `End` after `Start`. The number of frames, their sizes and their pixels are left to the server.
+- `Usage.VideoFrames` and `Usage.VideoSeconds`, nil for a request without videos, and `Decision.Warnings`, the server's notes exactly as sent, empty when there are none.
+- `MaxVideos` and `MaxVideoFPS`.
+
+### Changed
+
+- `SpecVersion` is `"1.2"`.
+- Up to 16 images a request (`MaxImages`), all of a request's uploads in one presign of up to 16 files. The 17th image is refused locally with "Too many images: 17, the limit is 16.".
+- A model's image and video limits held from `Models` are also read where the API publishes them, in its `images` and `videos` objects.
+
 ## [0.2.0] - Unreleased
 
 Implements version 1.1 of the DecisionNode SDK surface: every public call.

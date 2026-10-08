@@ -4,7 +4,8 @@ The Go client for the [DecisionNode](https://decisionnode.com) API: ask structur
 
 - Four question types: `truth` (how likely a statement is true), `choice` (one option of a set), `score` (a place on an ordered scale) and `number` (a value on a grid you define).
 - Decisions one at a time, many at once, as a live session over a WebSocket, or as a batch at half the price.
-- Images by URL, from files or from bytes, checked locally and uploaded only when that is faster.
+- Up to 16 images by URL, from files or from bytes, checked locally and uploaded only when that is faster.
+- Videos sent as the frames you sampled, each with its time.
 - Typed answers and typed errors, matched with `errors.As`.
 - Retries, timeouts, connection reuse and HTTP/2 built in. One dependency, for WebSockets.
 
@@ -118,13 +119,13 @@ Numbers are passed through exactly as received: a probability list may read 0.82
 | `Models(ctx)` | The models your key can use, with their published limits, as `[]dn.ModelInfo`. The session, batch, number and upload limits are also typed fields (`Sessions`, `Batch`, `NumberMaxGridValues`, ...). |
 | `DecideRaw(ctx, body)` | Sends a body exactly as given and returns the parsed response. For API fields this version does not know yet. |
 
-`Check`, `Classify`, `Score`, `Number` and `Gate` take `Images` and `Model` like `Decide`. `Check`, `Classify`, `Score` and `Number` promise a typed answer, so when their own answer is missing or malformed they return a `*ServerError` with the response's status, `RequestID` and `Reason`. `Decide` returns such an answer as an `*UnknownAnswer` instead.
+`Check`, `Classify`, `Score`, `Number` and `Gate` take `Images`, `Videos` and `Model` like `Decide`. `Check`, `Classify`, `Score` and `Number` promise a typed answer, so when their own answer is missing or malformed they return a `*ServerError` with the response's status, `RequestID` and `Reason`. `Decide` returns such an answer as an `*UnknownAnswer` instead.
 
-A `*Decision` holds `Answers`, `Model` (the resolved version), `Usage.InputTokens` and `Usage.OutputTokens` (`*int`), `RequestID`, `LatencyMs` (`*float64`, the server's time), `Safety` and `Raw` (the parsed body). A value the server did not send is `nil`, never 0.
+A `*Decision` holds `Answers`, `Model` (the resolved version), `Usage.InputTokens` and `Usage.OutputTokens` (`*int`), `RequestID`, `LatencyMs` (`*float64`, the server's time), `Safety`, `Warnings` and `Raw` (the parsed body). For a request with videos, `Usage.VideoFrames` (`*int`) is the number of frames read and `Usage.VideoSeconds` (`*float64`) the seconds of the windows read, and `Warnings` holds the server's notes exactly as sent when it read a video at a lower rate or resolution than asked (empty, never nil, when there are none). A value the server did not send is `nil`, never 0.
 
 An answer the server sent with the wire type `noul` (every `Systemone` truth answer) is read into a `*TruthAnswer` too.
 
-`dn.SpecVersion` is the version of the DecisionNode SDK specification this package implements, `"1.1"`.
+`dn.SpecVersion` is the version of the DecisionNode SDK specification this package implements, `"1.2"`.
 
 The client is safe for concurrent use and reuses its connections (HTTP/2 when the server offers it, TLS sessions resumed): create one and share it. Cancel or bound any call with its context.
 
@@ -151,9 +152,42 @@ d, err := client.Decide(ctx, dn.Request{
 | `dn.ImageReader(id, r, mediaType)` | The bytes read from an `io.Reader`, read when the `Image` is made. |
 | `dn.ImageUpload(id, uploadID, mediaType)` | An upload made earlier (`client.Upload`), less than an hour old. |
 
-Every image is checked before anything is sent: at most 4 a request (URLs included), ids present and unique, local bytes JPEG, PNG or WebP by their first bytes (and matching a given media type), at most 10 MB, at most 40 megapixels read from the image header. A failure is the API's own `*BadRequestError` with no status, and nothing is sent. No image is resized or re-encoded.
+Every image is checked before anything is sent: at most 16 a request (URLs included), ids present and unique, local bytes JPEG, PNG or WebP by their first bytes (and matching a given media type), at most 10 MB, at most 40 megapixels read from the image header. A failure is the API's own `*BadRequestError` with no status, and nothing is sent. No image is resized or re-encoded.
 
 Local images travel the faster way for their size. When a request's local images together are under `dn.DefaultInlineThreshold` (524,288 bytes; `dn.WithInlineThreshold` changes it) they go inline as base64. At or above it they are uploaded first: one `POST /v1/uploads` for all of them, then the bytes straight to storage, in parallel, then the request names them by `upload_id`. The client remembers what it uploaded, by the bytes' SHA-256, in memory, until 5 minutes before the upload expires: the same bytes in a later call, in another request of `DecideMany`, in a session frame or a batch line are named by their `upload_id` whatever their size, and are never uploaded twice at once. If the server answers that an upload the client named has expired or is gone, the client uploads it again and sends the request once more; that does not count as a retry.
+
+### Videos
+
+A video travels as the frames you already hold, each with its time in seconds, and the server reads them as one video, in order and with their times. Only frames are sent: no video file, no video URL and no sound.
+
+```go
+var frames []dn.VideoFrame
+for i, path := range []string{"dock-0000.jpg", "dock-0001.jpg", "dock-0002.jpg"} {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatal(err)
+	}
+	frames = append(frames, dn.VideoFrameData(float64(i)*0.5, b, "")) // 0, 0.5 and 1 s
+}
+
+d, err := client.Decide(ctx, dn.Request{
+	State:  "Warehouse camera 4, loading dock, shift B.",
+	Videos: []any{dn.Video{ID: "dock", Frames: frames}},
+	Questions: dn.Questions{
+		dn.Q("fall", dn.Truth("Does a person fall in the video?")),
+		dn.Q("forklifts", dn.NumberWith("How many forklifts pass the door?", 0, 50, nil)),
+	},
+})
+fmt.Println(d.Truth("fall").Truth, d.Number("forklifts").Number, d.Warnings)
+```
+
+| Builder | Sends |
+|---|---|
+| `dn.VideoFrameData(t, bytes, mediaType)` | A frame `t` seconds into the video, its bytes as base64. An empty `mediaType` is taken from the first bytes (JPEG, PNG or WebP). |
+| `dn.VideoFrameBase64(t, text, mediaType)` | A frame given as base64 text, sent as given, with its media type. |
+| `dn.Video{ID, Frames, FPS, Start, End}` | A video: its id (unique across the request's images and videos), its frames with strictly increasing times, and optionally `FPS` (the most frames a second to read, above 0 and at most 4; the server's default is 2) and the window `[Start, End)` on the frames' own times, set with `dn.Ptr(2.0)`. |
+
+`Request.Videos` holds up to 4 videos, each a `dn.Video` or a video in its JSON wire form (a `map[string]any` or a `json.RawMessage`), checked by the same rules. `Systemone`, the helpers, `DecideMany` and batch requests take videos as `Decide` does; sessions do not. Frames always go inline: they are never uploaded or cached, and no frame is resized or re-encoded. The checks above run before anything is sent; how many frames a request may carry, their sizes and their pixels are the server's to judge. To turn a video file into frames, use the `dn` command line tool: `dn --video dock.mp4`.
 
 ### Safety
 
@@ -294,7 +328,8 @@ The server never sees a request the client could have refused. Every fixed rule 
 | more than 128 objects and arrays inside each other; an unknown question type (a number question on `Systemone` included) | `*BadRequestError`, `ErrorType` `api_usage_error`, "Invalid request." |
 | a question that is not an object or has no type; instructions, a state, an option description, a level or a truth side that is not a string, an object or an array; a choice or score without criteria, of the wrong shape, or a score with no level; a number grid that cannot be built (a bound not a number, beyond 2^53, more than 6 decimals, `step` not above 0, `min` above `max`, more than 4,096 values); a session `Window` or `TTLSeconds` out of range | `*ValidationError` with the API's entries, empty `ErrorType` |
 | a choice with no option or more than 255, a score over 10 levels, a truth without instructions or criteria, a number without instructions | `*BadRequestError` with the API's message and an empty `ErrorType` |
-| an image over its limits, more than 4, an empty or repeated id, a URL that is not `https` | `*BadRequestError`, `api_usage_error` |
+| an image over its limits, more than 16, an empty or repeated id, a URL that is not `https` | `*BadRequestError`, `api_usage_error` |
+| more than 4 videos; a video without an id or with an id already used by an image or a video; a video without frames; a frame time that is negative or not after the one before it; a frame that is not JPEG, PNG or WebP by its media type; `FPS` not above 0 and at most 4; `Start` or `End` negative; `End` not after `Start` | `*BadRequestError`, `api_usage_error` |
 | an `https` image URL over 2,048 characters, with user information, on a port other than 443, or naming a private address | `*BadRequestError`, `image_url_refused` |
 | a batch line without a valid or unique `CustomID`, an `Add` with no requests, a `List` page out of range | `*BadRequestError`, `api_usage_error` |
 
@@ -334,7 +369,7 @@ An option wins over the environment, and the environment over the default. The b
 DECISIONNODE_CONFORMANCE_DIR=/path/to/decision-node-conformance go test ./...
 ```
 
-The conformance tests run every case of the DecisionNode conformance suite against its mock server, and need `python3` for that server. `DECISIONNODE_CONFORMANCE_DIR` must point at a checkout of the suite: when it is unset the conformance test fails, it is never skipped. To run only the unit tests, pass `-skip TestConformance`. This version passes conformance suite 1.6; CI checks the suite out at the commit named once, in `CONFORMANCE_REF` in `.github/workflows/ci.yml`, with every action pinned to a commit and no credentials left in the checkouts.
+The conformance tests run every case of the DecisionNode conformance suite against its mock server, and need `python3` for that server. `DECISIONNODE_CONFORMANCE_DIR` must point at a checkout of the suite: when it is unset the conformance test fails, it is never skipped. To run only the unit tests, pass `-skip TestConformance`. This version passes conformance suite 1.7; CI checks the suite out at the commit named once, in `CONFORMANCE_REF` in `.github/workflows/ci.yml`, with every action pinned to a commit and no credentials left in the checkouts.
 
 ## License
 

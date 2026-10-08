@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	dn "github.com/Bynn-Intelligence/decision-node-go"
@@ -234,4 +235,32 @@ func ExampleClient_RunBatch() {
 			fmt.Println(r.CustomID, r.Status, r.StatusText, r.Err)
 		}
 	}
+}
+
+func ExampleVideo() {
+	client := dn.NewClient()
+	ctx := context.Background()
+
+	// Frames a camera already holds, each with its time in seconds.
+	var frames []dn.VideoFrame
+	for i, path := range []string{"dock-0000.jpg", "dock-0001.jpg", "dock-0002.jpg"} {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			log.Fatal(err)
+		}
+		frames = append(frames, dn.VideoFrameData(float64(i)*0.5, b, ""))
+	}
+
+	d, err := client.Decide(ctx, dn.Request{
+		State:  "Warehouse camera 4, loading dock, shift B.",
+		Videos: []any{dn.Video{ID: "dock", Frames: frames}},
+		Questions: dn.Questions{
+			dn.Q("fall", dn.Truth("Does a person fall in the video?")),
+			dn.Q("forklifts", dn.NumberWith("How many forklifts pass the door?", 0, 50, nil)),
+		},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(d.Truth("fall").Truth, d.Number("forklifts").Number, d.Warnings)
 }

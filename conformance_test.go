@@ -454,11 +454,24 @@ func normDecision(d *dn.Decision) any {
 		"model":      nilIfEmpty(d.Model),
 		"request_id": nilIfEmpty(d.RequestID),
 		"latency_ms": latency,
-		"usage":      map[string]any{"input_tokens": intOrNil(d.Usage.InputTokens), "output_tokens": intOrNil(d.Usage.OutputTokens)},
-		"safety":     normSafety(d.Safety),
-		"answers":    answers,
-		"raw":        d.Raw,
+		"usage": map[string]any{
+			"input_tokens":  intOrNil(d.Usage.InputTokens),
+			"output_tokens": intOrNil(d.Usage.OutputTokens),
+			"video_frames":  intOrNil(d.Usage.VideoFrames),
+			"video_seconds": floatOrNil(d.Usage.VideoSeconds),
+		},
+		"warnings": d.Warnings,
+		"safety":   normSafety(d.Safety),
+		"answers":  answers,
+		"raw":      d.Raw,
 	})
+}
+
+func floatOrNil(p *float64) any {
+	if p == nil {
+		return nil
+	}
+	return *p
 }
 
 func intOrNil(p *int) any {
@@ -773,7 +786,7 @@ func decodeImage(root string, v any, r refs) (dn.Image, error) {
 }
 
 func decodeImages(root string, v any, r refs) ([]dn.Image, error) {
-	arr, _ := v.([]any)
+	arr := listArg(v)
 	var out []dn.Image
 	for _, item := range arr {
 		img, err := decodeImage(root, item, r)
@@ -787,6 +800,10 @@ func decodeImages(root string, v any, r refs) ([]dn.Image, error) {
 
 func decodeRequest(root string, args *object, r refs) (dn.Request, error) {
 	images, err := decodeImages(root, args.vals["images"], r)
+	if err != nil {
+		return dn.Request{}, err
+	}
+	videos, err := decodeVideos(root, args.vals["videos"], r)
 	var state any
 	if v, ok := get(args, "state"); ok && v != nil {
 		state = plainArg(v, r)
@@ -795,8 +812,81 @@ func decodeRequest(root string, args *object, r refs) (dn.Request, error) {
 		State:     state,
 		Questions: decodeQuestions(args.vals["questions"]),
 		Images:    images,
+		Videos:    videos,
 		Model:     str(args.vals["model"]),
 	}, err
+}
+
+// decodeVideos reads a request's videos: {"$video": {id, frames, fps, start,
+// end}} is a dn.Video, any other value a video in its wire form, passed as is.
+func decodeVideos(root string, v any, r refs) ([]any, error) {
+	arr := listArg(v)
+	var out []any
+	for _, item := range arr {
+		o, ok := item.(*object)
+		if !ok || len(o.keys) != 1 || o.keys[0] != "$video" {
+			out = append(out, plainArg(item, r))
+			continue
+		}
+		args := o.vals["$video"].(*object)
+		video := dn.Video{ID: str(args.vals["id"])}
+		for _, name := range []string{"fps", "start", "end"} {
+			n, ok := args.vals[name].(json.Number)
+			if !ok {
+				continue
+			}
+			f, _ := n.Float64()
+			switch name {
+			case "fps":
+				video.FPS = &f
+			case "start":
+				video.Start = &f
+			default:
+				video.End = &f
+			}
+		}
+		frames, _ := args.vals["frames"].([]any)
+		for _, fr := range frames {
+			frame, err := decodeVideoFrame(root, fr)
+			if err != nil {
+				return nil, err
+			}
+			video.Frames = append(video.Frames, frame)
+		}
+		out = append(out, video)
+	}
+	return out, nil
+}
+
+// decodeVideoFrame reads {"$frame": {t, path | data_base64 | data_text,
+// media_type}}, or a frame in its wire form, which is base64 text with its
+// media type.
+func decodeVideoFrame(root string, v any) (dn.VideoFrame, error) {
+	o := v.(*object)
+	args := o
+	if len(o.keys) == 1 && o.keys[0] == "$frame" {
+		args = o.vals["$frame"].(*object)
+	} else {
+		t, _ := o.vals["t"].(json.Number).Float64()
+		return dn.VideoFrameBase64(t, str(o.vals["data"]), str(o.vals["media_type"])), nil
+	}
+	t, _ := args.vals["t"].(json.Number).Float64()
+	mediaType := str(args.vals["media_type"])
+	switch {
+	case args.vals["data_text"] != nil:
+		return dn.VideoFrameBase64(t, str(args.vals["data_text"]), mediaType), nil
+	case args.vals["path"] != nil:
+		b, err := os.ReadFile(filepath.Join(root, str(args.vals["path"])))
+		if err != nil {
+			return dn.VideoFrame{}, err
+		}
+		return dn.VideoFrameData(t, b, mediaType), nil
+	}
+	b, err := base64.StdEncoding.DecodeString(str(args.vals["data_base64"]))
+	if err != nil {
+		return dn.VideoFrame{}, err
+	}
+	return dn.VideoFrameData(t, b, mediaType), nil
 }
 
 // listArg returns a list argument, expanding {"$list": {count, item}} into
@@ -933,6 +1023,10 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 	if err != nil {
 		return nil, err
 	}
+	videos, err := decodeVideos(root, args.vals["videos"], r)
+	if err != nil {
+		return nil, err
+	}
 	if check, _ := call.vals["check"].(bool); check {
 		// The same request handed to the SDK's check instead of being sent.
 		return nil, runCheck(root, c, method, args, r)
@@ -969,6 +1063,7 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 			IfTrue:       argValue(args, "true"),
 			IfFalse:      argValue(args, "false"),
 			Images:       images,
+			Videos:       videos,
 			Model:        str(args.vals["model"]),
 		})
 	case "classify":
@@ -977,6 +1072,7 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 			Instructions: argValue(args, "instructions"),
 			Options:      decodeOptions(args.vals["options"]),
 			Images:       images,
+			Videos:       videos,
 			Model:        str(args.vals["model"]),
 		})
 	case "score":
@@ -985,6 +1081,7 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 			Instructions: argValue(args, "instructions"),
 			Levels:       argValue(args, "levels"),
 			Images:       images,
+			Videos:       videos,
 			Model:        str(args.vals["model"]),
 		})
 	case "number":
@@ -995,6 +1092,7 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 			Max:          argValue(args, "max"),
 			Step:         argValue(args, "step"),
 			Images:       images,
+			Videos:       videos,
 			Model:        str(args.vals["model"]),
 		})
 	case "gate":
@@ -1002,6 +1100,7 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 			Action:  argValue(args, "action"),
 			Context: argValue(args, "context"),
 			Images:  images,
+			Videos:  videos,
 			Model:   str(args.vals["model"]),
 		})
 	case "models":

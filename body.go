@@ -12,14 +12,17 @@ import (
 // to its images, which are placed last: inline, by URL or by upload_id, as
 // the inline threshold and the upload cache decide at send time.
 type prepared struct {
-	// head is the body without its images and its closing brace.
-	head   []byte
+	// head is the body without its videos, its images and its closing brace.
+	head []byte
+	// videos is the `,"videos":[...]` member, or empty. Frames always go
+	// inline: they are never uploaded or cached.
+	videos []byte
 	images []Image
 }
 
 // body returns the full body with the images' wire forms.
 func (p *prepared) body(wires [][]byte) []byte {
-	n := len(p.head) + 1
+	n := len(p.head) + len(p.videos) + 1
 	if len(wires) > 0 {
 		n += len(`,"images":[]`) + len(wires) - 1
 		for _, w := range wires {
@@ -28,6 +31,7 @@ func (p *prepared) body(wires [][]byte) []byte {
 	}
 	out := make([]byte, 0, n)
 	out = append(out, p.head...)
+	out = append(out, p.videos...)
 	if len(wires) > 0 {
 		out = append(out, `,"images":[`...)
 		for i, w := range wires {
@@ -72,9 +76,13 @@ func (c *Client) prepare(req Request, systemone bool, customID *string) (*prepar
 	if err != nil {
 		return nil, err
 	}
+	videos, videoDepth, err := encodeVideos(req.Videos)
+	if err != nil {
+		return nil, err
+	}
 	// The server's order: the nesting limit, the 422 entries, the first 400,
-	// then the images.
-	depth := max(jsonDepth(stateJSON)+1, jsonDepth(questions)+1)
+	// then the images, then the videos.
+	depth := max(jsonDepth(stateJSON)+1, jsonDepth(questions)+1, videoDepth)
 	if len(req.Images) > 0 {
 		depth = max(depth, 3)
 	}
@@ -85,6 +93,10 @@ func (c *Client) prepare(req Request, systemone bool, customID *string) (*prepar
 		return nil, err
 	}
 	if err := checkImages(req.Images, lim); err != nil {
+		return nil, err
+	}
+	videosJSON, err := checkVideos(videos, req.Images, lim)
+	if err != nil {
 		return nil, err
 	}
 	var head bytes.Buffer
@@ -102,7 +114,7 @@ func (c *Client) prepare(req Request, systemone bool, customID *string) (*prepar
 	head.Write(stateJSON)
 	head.WriteString(`,"questions":`)
 	head.Write(questions)
-	return &prepared{head: head.Bytes(), images: req.Images}, nil
+	return &prepared{head: head.Bytes(), videos: videosJSON, images: req.Images}, nil
 }
 
 func encodeError(err error) error {

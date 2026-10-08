@@ -15,7 +15,7 @@ import (
 const (
 	// MaxImages is the most images one request (or batch line) may carry,
 	// URLs included.
-	MaxImages = 4
+	MaxImages = 16
 	// MaxImageBytes is the largest image, in bytes.
 	MaxImageBytes = 10 * 1024 * 1024
 	// MaxImagePixels is the largest image, in pixels, read from its header.

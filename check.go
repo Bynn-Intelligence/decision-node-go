@@ -416,7 +416,7 @@ func (qc *questionCheck) number(id string, q map[string]json.RawMessage, raw []b
 }
 
 // checkImages checks a request's images against the API's fixed rules: at
-// most 4 (URLs included), ids present and unique, URLs https and fetchable by
+// most 16 (URLs included), ids present and unique, URLs https and fetchable by
 // the server's rules, local bytes JPEG, PNG or WebP by their first bytes and
 // matching a declared type, at most 10 MB and 40 megapixels.
 func checkImages(images []Image, lim limits) error {
@@ -425,8 +425,8 @@ func checkImages(images []Image, lim limits) error {
 		most = lim.maxImages
 	}
 	if len(images) > most {
-		return localBadRequest("api_usage_error", fmt.Sprintf("Too many images. Must have at most %d images.", most),
-			fmt.Sprintf("a request takes up to %d images, got %d", most, len(images)))
+		return localBadRequest("api_usage_error", fmt.Sprintf("Too many images: %d, the limit is %d.", len(images), most),
+			fmt.Sprintf("%d images, the limit is %d", len(images), most))
 	}
 	seen := make(map[string]bool, len(images))
 	for i, img := range images {
@@ -557,6 +557,7 @@ type limits struct {
 	maxScoreLevels   int
 	maxImages        int
 	maxImageBytes    int
+	maxVideos        int
 	gridHeld         bool
 	maxGridValues    int
 	sessionsHeld     bool
@@ -577,6 +578,19 @@ func limitsOf(name string, m ModelInfo) limits {
 	l.maxScoreLevels, _ = num("max_score_levels")
 	l.maxImages, _ = num("max_images")
 	l.maxImageBytes, _ = num("max_image_bytes")
+	// The API publishes the image and video limits in objects of their own.
+	nested := func(group, key string) int {
+		g, _ := m.Raw[group].(map[string]any)
+		f, _ := g[key].(float64)
+		return int(f)
+	}
+	if l.maxImages == 0 {
+		l.maxImages = nested("images", "max_images")
+	}
+	if l.maxImageBytes == 0 {
+		l.maxImageBytes = nested("images", "max_image_bytes")
+	}
+	l.maxVideos = nested("videos", "max_videos")
 	l.maxGridValues, l.gridHeld = num("number_max_grid_values")
 	if m.Sessions != nil {
 		if enabled, ok := m.Raw["sessions"].(map[string]any)["enabled"].(bool); ok {

@@ -8,9 +8,9 @@ permissions:
   contents: read
 
 env:
-  # The conformance suite commit this package targets (suite 1.6). Moving to a
+  # The conformance suite commit this package targets (suite 1.7). Moving to a
   # newer suite is a reviewed change to this one line.
-  CONFORMANCE_REF: f3138afe4360ec9f94ff740901498a2ef07b3ea5
+  CONFORMANCE_REF: ab58490ec38b2c61327921544aacbfed6bfaa4ae
 
 jobs:
   test:

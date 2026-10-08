@@ -16,8 +16,13 @@ type Request struct {
 	State any
 	// Questions holds the questions, by id, in the order they are sent.
 	Questions Questions
-	// Images are sent beside the state. Every question sees every image.
+	// Images are sent beside the state, up to 16. Every question sees every
+	// image.
 	Images []Image
+	// Videos are sent beside the state and the images, up to 4, each as the
+	// frames the caller sampled: a Video, or a video in its JSON wire form
+	// (a map[string]any, a json.RawMessage). Every question sees every video.
+	Videos []any
 	// Model overrides the client's model for this call.
 	Model string
 }
