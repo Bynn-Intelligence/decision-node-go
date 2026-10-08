@@ -288,3 +288,128 @@ func TestSessionFramesAndRawJSON(t *testing.T) {
 		t.Fatalf("frames on the socket: %q", got)
 	}
 }
+
+func TestChecksSendNothing(t *testing.T) {
+	srv, rec := server(t, func(w http.ResponseWriter, r *http.Request, n int) { respond(w, 200, truthBody, nil) })
+	c := client(t, srv.URL)
+	big := dn.ImageData("scan", bigPNG(t, 600_000), "")
+	if err := c.CheckDecide(dn.Request{Questions: oneTruth(), Images: []dn.Image{big}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.CheckSystemone(dn.Request{Questions: dn.Questions{dn.Q("n", dn.Number("How many?"))}}); err == nil {
+		t.Fatal("a number question passed the systemone check")
+	}
+	if err := c.CheckSession(dn.SessionRequest{Questions: oneTruth(), Window: dn.Ptr(65)}); err == nil {
+		t.Fatal("window 65 passed")
+	}
+	dup := []dn.BatchRequest{{CustomID: dn.Ptr("a"), Request: dn.Request{Questions: oneTruth()}}, {CustomID: dn.Ptr("a"), Request: dn.Request{Questions: oneTruth()}}}
+	var bad *dn.BadRequestError
+	if err := c.CheckBatchCreate(dup); !errors.As(err, &bad) || bad.Error() != `Line 2: custom_id "a" is already in the batch.` {
+		t.Fatalf("got %v", err)
+	}
+	if err := c.CheckBatchCreate(nil); err != nil {
+		t.Fatal("an empty create is valid:", err)
+	}
+	if err := c.CheckBatchAdd(nil); !errors.As(err, &bad) {
+		t.Fatal("an empty add passed")
+	}
+	if rec.count() != 0 {
+		t.Fatalf("%d requests were sent", rec.count())
+	}
+}
+
+func TestResultsStreamLineByLine(t *testing.T) {
+	const lines = 3000
+	srv, _ := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		flusher := w.(http.Flusher)
+		for i := 0; i < lines; i++ {
+			fmt.Fprintf(w, `{"custom_id":"r%d","status":200,"body":{"model":"decisionnode-1.0","answers":{"q":{"type":"truth","truth":0.5}}},"headers":{"x-request-id":"req_%d"}}`+"\n", i, i)
+			if i == lines/2 {
+				flusher.Flush()
+				// A pause shorter than the idle timeout does not end the read.
+				time.Sleep(300 * time.Millisecond)
+			}
+		}
+	})
+	c := client(t, srv.URL, dn.WithTimeout(time.Second))
+	r, err := c.Batches().ResultsReader(context.Background(), "batch_0123456789")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	n := 0
+	for r.Next() {
+		res := r.Result()
+		if res.CustomID != fmt.Sprintf("r%d", n) || res.Decision.Truth("q").Truth != 0.5 || res.Headers["x-request-id"] != fmt.Sprintf("req_%d", n) {
+			t.Fatalf("line %d: %+v", n, res)
+		}
+		n++
+	}
+	if r.Err() != nil || n != lines {
+		t.Fatalf("%d lines, %v", n, r.Err())
+	}
+}
+
+func TestResultsIdleTimeout(t *testing.T) {
+	srv, _ := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		fmt.Fprintln(w, `{"custom_id":"a","status":"cancelled","body":null,"headers":{}}`)
+		w.(http.Flusher).Flush()
+		time.Sleep(1500 * time.Millisecond)
+	})
+	r, err := client(t, srv.URL, dn.WithTimeout(300*time.Millisecond), dn.WithMaxRetries(0)).Batches().ResultsReader(context.Background(), "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if !r.Next() || r.Result().StatusText != "cancelled" {
+		t.Fatal("the first line")
+	}
+	var te *dn.TimeoutError
+	if r.Next() || !errors.As(r.Err(), &te) {
+		t.Fatalf("a stalled body: %v", r.Err())
+	}
+}
+
+func TestUploadTimeoutArgument(t *testing.T) {
+	clearEnv(t)
+	if err := dn.NewClient(dn.WithUploadTimeout(0)).Err(); err == nil {
+		t.Fatal("an upload timeout of 0 was accepted")
+	}
+}
+
+func TestSessionSocketUsesTheClientTransport(t *testing.T) {
+	up := websocket.Upgrader{}
+	var srv *httptest.Server
+	srv = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/sessions" {
+			respond(w, 200, `{"session_id":"ses_000000000000000000000001","stream_url":"`+strings.Replace(srv.URL, "https", "wss", 1)+`/stream","questions":["q"]}`, nil)
+			return
+		}
+		conn, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(1000, ""))
+		_ = conn.Close()
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+	// The test server's certificate is trusted only through this transport,
+	// and both sides offer h2: the socket must still dial HTTP/1.1.
+	tr := srv.Client().Transport.(*http.Transport).Clone()
+	tr.ForceAttemptHTTP2 = true
+	c := client(t, srv.URL, dn.WithHTTPClient(&http.Client{Transport: tr}))
+	s, err := c.OpenSession(context.Background(), dn.SessionRequest{Questions: oneTruth()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Connect(context.Background()); err != nil {
+		t.Fatalf("connect through the client's TLS settings: %v", err)
+	}
+	ev, _ := s.Next(context.Background())
+	if closed, ok := ev.(*dn.SessionClosed); !ok || closed.Code != 1000 {
+		t.Fatalf("got %#v", ev)
+	}
+}

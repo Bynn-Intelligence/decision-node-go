@@ -534,7 +534,7 @@ func (c *Client) put(ctx context.Context, up presigned, data []byte) error {
 }
 
 func (c *Client) putOnce(ctx context.Context, up presigned, data []byte, path string, attempt int) (int, http.Header, []byte, error) {
-	actx, cancel := context.WithTimeout(ctx, c.timeout)
+	actx, cancel := context.WithTimeout(ctx, c.uploadTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(actx, http.MethodPut, up.URL, bytes.NewReader(data))
 	if err != nil {
@@ -556,6 +556,9 @@ func (c *Client) putOnce(ctx context.Context, up presigned, data []byte, path st
 	elapsed := time.Since(start)
 	if err != nil {
 		c.log(ctx, http.MethodPut, path, 0, "", elapsed, attempt, err)
+		if ctx.Err() == nil && (errors.Is(actx.Err(), context.DeadlineExceeded) || isTimeout(err)) {
+			return 0, nil, nil, &TimeoutError{&Error{msg: "the upload timed out after " + c.uploadTimeout.String(), Err: err}}
+		}
 		return 0, nil, nil, c.transportError(ctx, actx, err)
 	}
 	c.log(ctx, http.MethodPut, path, resp.StatusCode, "", elapsed, attempt, nil)

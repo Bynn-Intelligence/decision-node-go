@@ -168,6 +168,12 @@ type ModelInfo struct {
 	// Raw is the entry as sent by the server.
 	Raw map[string]any
 
+	// Version is the pinned model version the name resolves to, and Alias
+	// the alias that moves with releases, when the entry states them. Both
+	// are also in Limits.
+	Version string
+	Alias   string
+
 	// NumberOneQuestionValues is the most grid values answered as one question.
 	NumberOneQuestionValues *int
 	// NumberMaxGridValues is the most values a number grid may hold.
@@ -329,6 +335,8 @@ func parseModels(body []byte) ([]ModelInfo, error) {
 				m.Limits[k] = v
 			}
 		}
+		m.Version, _ = entry["version"].(string)
+		m.Alias, _ = entry["alias"].(string)
 		m.NumberOneQuestionValues = intField(entry, "number_one_question_values")
 		m.NumberMaxGridValues = intField(entry, "number_max_grid_values")
 		if r, ok := entry["number_default_range"].([]any); ok {

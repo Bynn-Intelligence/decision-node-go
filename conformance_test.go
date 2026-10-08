@@ -799,9 +799,45 @@ func decodeRequest(root string, args *object, r refs) (dn.Request, error) {
 	}, err
 }
 
+// listArg returns a list argument, expanding {"$list": {count, item}} into
+// count copies of item with {i} in its strings replaced by the index.
+func listArg(v any) []any {
+	if o, ok := v.(*object); ok && len(o.keys) == 1 && o.keys[0] == "$list" {
+		args := o.vals["$list"].(*object)
+		n, _ := args.vals["count"].(json.Number).Int64()
+		out := make([]any, n)
+		for i := range out {
+			out[i] = withIndex(args.vals["item"], strconv.Itoa(i))
+		}
+		return out
+	}
+	arr, _ := v.([]any)
+	return arr
+}
+
+func withIndex(v any, i string) any {
+	switch x := v.(type) {
+	case string:
+		return strings.ReplaceAll(x, "{i}", i)
+	case *object:
+		o := &object{keys: x.keys, vals: map[string]any{}}
+		for k, val := range x.vals {
+			o.vals[k] = withIndex(val, i)
+		}
+		return o
+	case []any:
+		out := make([]any, len(x))
+		for j, e := range x {
+			out[j] = withIndex(e, i)
+		}
+		return out
+	}
+	return v
+}
+
 func decodeBatchRequests(root string, v any, r refs) ([]dn.BatchRequest, error) {
 	var out []dn.BatchRequest
-	arr, _ := v.([]any)
+	arr := listArg(v)
 	for _, item := range arr {
 		o := item.(*object)
 		req, err := decodeRequest(root, o, r)
@@ -897,6 +933,10 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 	if err != nil {
 		return nil, err
 	}
+	if check, _ := call.vals["check"].(bool); check {
+		// The same request handed to the SDK's check instead of being sent.
+		return nil, runCheck(root, c, method, args, r)
+	}
 	switch method {
 	case "decide", "systemone":
 		req, err := decodeRequest(root, args, r)
@@ -909,7 +949,7 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 		return c.Decide(ctx, req)
 	case "decide_many":
 		var reqs []dn.Request
-		for _, item := range args.vals["requests"].([]any) {
+		for _, item := range listArg(args.vals["requests"]) {
 			req, err := decodeRequest(root, item.(*object), r)
 			if err != nil {
 				return nil, err
@@ -1053,6 +1093,32 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 	return nil, fmt.Errorf("unknown method %q", method)
 }
 
+func runCheck(root string, c *dn.Client, method string, args *object, r refs) error {
+	switch method {
+	case "decide", "systemone":
+		req, err := decodeRequest(root, args, r)
+		if err != nil {
+			return err
+		}
+		if method == "systemone" {
+			return c.CheckSystemone(req)
+		}
+		return c.CheckDecide(req)
+	case "open_session":
+		return c.CheckSession(decodeSessionRequest(args, r))
+	case "batches.create", "batches.add":
+		reqs, err := decodeBatchRequests(root, args.vals["requests"], r)
+		if err != nil {
+			return err
+		}
+		if method == "batches.create" {
+			return c.CheckBatchCreate(reqs)
+		}
+		return c.CheckBatchAdd(reqs)
+	}
+	return fmt.Errorf("no check for %q", method)
+}
+
 func makeClient(t *testing.T, c *object, mockURL string, extra map[string]string, more ...dn.Option) *dn.Client {
 	mockPort := ""
 	if u, err := url.Parse(mockURL); err == nil {
@@ -1086,6 +1152,10 @@ func makeClient(t *testing.T, c *object, mockURL string, extra map[string]string
 	if v, ok := get(spec, "max_retries"); ok && v != nil {
 		n, _ := v.(json.Number).Int64()
 		opts = append(opts, dn.WithMaxRetries(int(n)))
+	}
+	if v, ok := get(spec, "upload_timeout"); ok && v != nil {
+		f, _ := v.(json.Number).Float64()
+		opts = append(opts, dn.WithUploadTimeout(time.Duration(f*float64(time.Second))))
 	}
 	if v, ok := get(spec, "inline_threshold"); ok && v != nil {
 		n, _ := v.(json.Number).Int64()
@@ -1706,8 +1776,11 @@ func checkOutcome(spec map[string]any, result any, err error, path string) error
 		if !ok {
 			return fmt.Errorf("%s: expected batch results, got %T", path, result)
 		}
-		want, _ := spec["batch_results"].([]any)
-		return checkBatchResults(want, rs, path+".batch_results")
+		return checkResultsSpec(spec, rs, path)
+	case "checked":
+		if result != nil {
+			return fmt.Errorf("%s: a check returned %v", path, result)
+		}
 	case "batch_run":
 		run, ok := result.(*batchRun)
 		if !ok {
@@ -1717,9 +1790,7 @@ func checkOutcome(spec map[string]any, result any, err error, path string) error
 		if err := match(orEmpty(want), normBatch(run.batch), path+".batch"); err != nil {
 			return err
 		}
-		if want, ok := spec["batch_results"].([]any); ok {
-			return checkBatchResults(want, run.results, path+".batch_results")
-		}
+		return checkResultsSpec(spec, run.results, path)
 	case "session":
 		s, ok := result.(*dn.Session)
 		if !ok {
@@ -1773,6 +1844,35 @@ func checkOutcome(spec map[string]any, result any, err error, path string) error
 		}
 	default:
 		return fmt.Errorf("%s: unknown result kind %q", path, kind)
+	}
+	return nil
+}
+
+// checkResultsSpec checks batch_results whole, or count with
+// batch_results_sample by index.
+func checkResultsSpec(spec map[string]any, results []dn.BatchResult, path string) error {
+	if want, ok := spec["batch_results"].([]any); ok {
+		if err := checkBatchResults(want, results, path+".batch_results"); err != nil {
+			return err
+		}
+	}
+	if n, ok := spec["count"].(float64); ok && len(results) != int(n) {
+		return fmt.Errorf("%s: expected %v results, got %d", path, n, len(results))
+	}
+	samples, _ := spec["batch_results_sample"].([]any)
+	for _, item := range samples {
+		sample := map[string]any{}
+		for k, v := range item.(map[string]any) {
+			sample[k] = v
+		}
+		i := int(sample["index"].(float64))
+		delete(sample, "index")
+		if i >= len(results) {
+			return fmt.Errorf("%s: no result %d of %d", path, i, len(results))
+		}
+		if err := checkBatchResults([]any{sample}, results[i:i+1], fmt.Sprintf("%s.batch_results[%d]", path, i)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1831,6 +1931,14 @@ func runSteps(t *testing.T, root string, m *mock, sid string, client *dn.Client,
 			f, err := decodeFrame(root, args, saved)
 			if err != nil {
 				return events, err
+			}
+			if check, _ := step.vals["check"].(bool); check {
+				err = s.CheckFrame(f)
+				o, _ := get(step, "outcome")
+				if e := checkOutcome(plain(o).(map[string]any), nil, err, where+".outcome"); e != nil {
+					return events, e
+				}
+				continue
 			}
 			_, err = s.Send(ctx, f)
 			if o, ok := get(step, "outcome"); ok {

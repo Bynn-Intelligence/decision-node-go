@@ -16,6 +16,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+var errSessionWithoutClient = errors.New("decisionnode: the session was not opened by a client")
+
 // maxSessionMessage bounds a message read from a session's socket.
 const maxSessionMessage = 16 << 20
 
@@ -222,6 +224,26 @@ func (c *Client) OpenSession(ctx context.Context, r SessionRequest) (*Session, e
 	if c.err != nil {
 		return nil, c.err
 	}
+	payload, err := c.sessionBody(r)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.doPayload(ctx, http.MethodPost, "/v1/sessions", payload)
+	if err != nil {
+		return nil, err
+	}
+	s, err := parseSession(resp.data)
+	if err != nil {
+		return nil, invalidResponse(resp, err)
+	}
+	s.client = c
+	s.RequestID = resp.header.Get("x-request-id")
+	return s, nil
+}
+
+// sessionBody checks an open request against the API's fixed rules and
+// encodes it, without sending anything.
+func (c *Client) sessionBody(r SessionRequest) ([]byte, error) {
 	if len(r.Questions) == 0 {
 		return nil, errors.New("decisionnode: questions must hold at least one question")
 	}
@@ -300,17 +322,7 @@ func (c *Client) OpenSession(ctx context.Context, r SessionRequest) (*Session, e
 		fmt.Fprintf(&buf, `,"ttl_seconds":%d`, *r.TTLSeconds)
 	}
 	buf.WriteByte('}')
-	resp, err := c.doPayload(ctx, http.MethodPost, "/v1/sessions", buf.Bytes())
-	if err != nil {
-		return nil, err
-	}
-	s, err := parseSession(resp.data)
-	if err != nil {
-		return nil, invalidResponse(resp, err)
-	}
-	s.client = c
-	s.RequestID = resp.header.Get("x-request-id")
-	return s, nil
+	return buf.Bytes(), nil
 }
 
 func parseSession(data []byte) (*Session, error) {
@@ -359,7 +371,7 @@ func parseAnswers(in map[string]json.RawMessage) map[string]Answer {
 func (s *Session) Connect(ctx context.Context) error {
 	c := s.client
 	if c == nil {
-		return errors.New("decisionnode: the session was not opened by a client")
+		return errSessionWithoutClient
 	}
 	if c.apiKey == "" {
 		return &AuthenticationError{&Error{msg: "no API key: pass WithAPIKey or set DECISIONNODE_API_KEY"}}
@@ -380,12 +392,7 @@ func (s *Session) Connect(ctx context.Context) error {
 	}
 	header.Set("Authorization", "Bearer "+c.apiKey)
 	header.Set("User-Agent", UserAgent)
-	dialer := websocket.Dialer{
-		Proxy:            http.ProxyFromEnvironment,
-		HandshakeTimeout: c.timeout,
-		ReadBufferSize:   16 << 10,
-		WriteBufferSize:  16 << 10,
-	}
+	dialer := c.wsDialer()
 	start := time.Now()
 	conn, resp, err := dialer.DialContext(ctx, s.StreamURL, header)
 	path := streamPath(s.StreamURL)
@@ -416,6 +423,35 @@ func (s *Session) Connect(ctx context.Context) error {
 	s.mu.Unlock()
 	go s.read(conn, q)
 	return nil
+}
+
+// wsDialer dials a session's socket the way the client's HTTP transport
+// dials: its proxy, its dialer and its TLS settings (certificates, roots,
+// session cache). The TLS offer is HTTP/1.1 only, since a WebSocket upgrade
+// is an HTTP/1.1 request and the transport's own offer may include h2.
+func (c *Client) wsDialer() *websocket.Dialer {
+	d := &websocket.Dialer{
+		Proxy:            http.ProxyFromEnvironment,
+		HandshakeTimeout: c.timeout,
+		ReadBufferSize:   16 << 10,
+		WriteBufferSize:  16 << 10,
+	}
+	rt := c.httpClient.Transport
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
+	t, ok := rt.(*http.Transport)
+	if !ok {
+		return d
+	}
+	d.Proxy = t.Proxy
+	d.NetDialContext = t.DialContext
+	if t.TLSClientConfig != nil {
+		cfg := t.TLSClientConfig.Clone()
+		cfg.NextProtos = []string{"http/1.1"}
+		d.TLSClientConfig = cfg
+	}
+	return d
 }
 
 // read turns the socket's messages into events until it closes. Pings are
@@ -497,6 +533,9 @@ func parseEvent(msg []byte) SessionEvent {
 // seq. The frame's image is sent inline or uploaded first, as the inline
 // threshold says.
 func (s *Session) Send(ctx context.Context, f Frame) (int64, error) {
+	if s.client == nil {
+		return 0, errSessionWithoutClient
+	}
 	frame, questions, err := s.checkFrame(f)
 	if err != nil {
 		return 0, err
@@ -638,7 +677,7 @@ func (s *Session) Replies() <-chan SessionEvent {
 // success, with a nil summary.
 func (s *Session) End(ctx context.Context) (*SessionSummary, error) {
 	if s.client == nil {
-		return nil, errors.New("decisionnode: the session was not opened by a client")
+		return nil, errSessionWithoutClient
 	}
 	return s.client.endSession(ctx, s.ID, retryDefault)
 }

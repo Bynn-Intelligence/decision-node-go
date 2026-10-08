@@ -30,6 +30,10 @@ const (
 	DefaultMaxRetries = 2
 	// DefaultConcurrency is the number of requests DecideMany runs at a time.
 	DefaultConcurrency = 8
+	// DefaultUploadTimeout is the time allowed for each attempt of an image's
+	// PUT to storage, apart from the API's timeout: 10 MB on a slow uplink
+	// needs more than 10 s.
+	DefaultUploadTimeout = 60 * time.Second
 )
 
 // Client calls the DecisionNode API. It is safe for concurrent use and reuses
@@ -47,6 +51,8 @@ type Client struct {
 	// inlineThreshold is the size under which a request's local images go
 	// inline; at or above it they are uploaded.
 	inlineThreshold int
+	// uploadTimeout bounds each storage PUT attempt.
+	uploadTimeout time.Duration
 	// uploads caches uploads by content hash, in memory, for this client only.
 	uploads *uploadCache
 	// now is the time uploads, upload URLs and cache entries are judged by.
@@ -153,6 +159,22 @@ func WithInlineThreshold(n int) Option {
 	}
 }
 
+// WithUploadTimeout sets the time allowed for each attempt of an image's PUT
+// to storage (default 60 s), from sending the bytes to reading the answer,
+// apart from WithTimeout, which bounds the API's calls. A PUT that outlives it
+// is retried like any upload attempt and is then a *TimeoutError. It must be
+// above 0; anything else is an argument error, returned by Err and by every
+// call.
+func WithUploadTimeout(d time.Duration) Option {
+	return func(c *Client) {
+		if d <= 0 {
+			c.fail(fmt.Errorf("decisionnode: the upload timeout must be above 0, got %s", d))
+			return
+		}
+		c.uploadTimeout = d
+	}
+}
+
 // ResponseInfo describes one HTTP response the client received, as passed to
 // the function given to WithResponseHook.
 type ResponseInfo struct {
@@ -194,6 +216,7 @@ func NewClient(opts ...Option) *Client {
 		maxRetries:      DefaultMaxRetries,
 		headers:         http.Header{},
 		inlineThreshold: DefaultInlineThreshold,
+		uploadTimeout:   DefaultUploadTimeout,
 		uploads:         newUploadCache(),
 		now:             time.Now,
 		sleep:           sleep,
@@ -634,8 +657,18 @@ func (c *Client) limitsFor(model string) limits {
 		model = c.model
 	}
 	c.heldMu.RLock()
+	defer c.heldMu.RUnlock()
 	m, ok := c.held[model]
-	c.heldMu.RUnlock()
+	if !ok {
+		// Else the entry that states the name as its alias or its pinned
+		// version. A name the list does not state holds nothing.
+		for _, e := range c.held {
+			if e.Alias == model || e.Version == model {
+				m, ok = e, true
+				break
+			}
+		}
+	}
 	if !ok {
 		return limits{model: model}
 	}

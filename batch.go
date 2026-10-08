@@ -1,11 +1,13 @@
 package decisionnode
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -145,7 +147,7 @@ func (b *BatchService) Create(ctx context.Context, reqs []BatchRequest) (*Batch,
 	if b.c.err != nil {
 		return nil, b.c.err
 	}
-	lines, err := b.c.batchLines(ctx, reqs)
+	lines, err := b.c.batchLines(ctx, reqs, true)
 	if err != nil {
 		return nil, err
 	}
@@ -163,10 +165,7 @@ func (b *BatchService) Add(ctx context.Context, batchID string, reqs []BatchRequ
 	if b.c.err != nil {
 		return nil, b.c.err
 	}
-	if len(reqs) == 0 {
-		return nil, usageError("The call holds no requests.")
-	}
-	lines, err := b.c.batchLines(ctx, reqs)
+	lines, err := b.c.batchLines(ctx, reqs, false)
 	if err != nil {
 		return nil, err
 	}
@@ -288,30 +287,104 @@ func (b *BatchService) List(ctx context.Context, opts BatchListOptions) (*BatchP
 }
 
 // Results reads an ended batch's results with GET /v1/batches/{id}/results,
-// as JSON Lines, one BatchResult per line in upload order. Before the batch
-// has ended the API answers 409 results_not_ready; 7 days after, 410
-// results_expired (a bare *Error with that status).
+// one BatchResult per line in upload order, and returns them all. It reads the
+// file line by line as it arrives; to handle each line without holding them
+// all, use ResultsReader. Before the batch has ended the API answers 409
+// results_not_ready; 7 days after, 410 results_expired (a bare *Error with
+// that status).
 func (b *BatchService) Results(ctx context.Context, batchID string) ([]BatchResult, error) {
-	if b.c.err != nil {
-		return nil, b.c.err
-	}
-	resp, err := b.c.doPayload(ctx, http.MethodGet, "/v1/batches/"+url.PathEscape(batchID)+"/results", nil)
+	r, err := b.ResultsReader(ctx, batchID)
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = r.Close() }()
 	var out []BatchResult
-	for _, line := range bytes.Split(resp.data, []byte("\n")) {
+	for r.Next() {
+		out = append(out, r.Result())
+	}
+	if err := r.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ResultsReader opens an ended batch's results for reading line by line, as
+// the file arrives from the network, however many lines it holds. The
+// request is retried like Get until the response begins; then the client's
+// timeout bounds each pause in the body, not the whole file. Close the reader
+// when done.
+//
+//	r, err := client.Batches().ResultsReader(ctx, batchID)
+//	if err != nil {
+//		return err
+//	}
+//	defer r.Close()
+//	for r.Next() {
+//		res := r.Result()
+//		...
+//	}
+//	return r.Err()
+func (b *BatchService) ResultsReader(ctx context.Context, batchID string) (*BatchResultsReader, error) {
+	resp, body, err := b.c.openStream(ctx, "/v1/batches/"+url.PathEscape(batchID)+"/results")
+	if err != nil {
+		return nil, err
+	}
+	return &BatchResultsReader{resp: resp, body: body, r: bufio.NewReaderSize(body, 64<<10)}, nil
+}
+
+// BatchResultsReader reads a batch's results one line at a time. It is not
+// safe for concurrent use.
+type BatchResultsReader struct {
+	resp *response
+	body io.ReadCloser
+	r    *bufio.Reader
+	cur  BatchResult
+	err  error
+	done bool
+}
+
+// Next reads the next result and reports whether there is one. It returns
+// false at the end of the file or on an error; Err tells them apart.
+func (r *BatchResultsReader) Next() bool {
+	for !r.done {
+		line, err := r.r.ReadBytes('\n')
+		if err != nil {
+			r.done = true
+			if !errors.Is(err, io.EOF) {
+				r.err = err
+				return false
+			}
+		}
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
 			continue
 		}
-		r, err := parseBatchResult(line)
-		if err != nil {
-			return nil, invalidResponse(resp, err)
+		res, perr := parseBatchResult(line)
+		if perr != nil {
+			r.done, r.err = true, invalidResponse(r.resp, perr)
+			return false
 		}
-		out = append(out, r)
+		r.cur = res
+		return true
 	}
-	return out, nil
+	return false
+}
+
+// Result returns the result Next read.
+func (r *BatchResultsReader) Result() BatchResult { return r.cur }
+
+// Err returns the error that stopped Next, or nil at the end of the file.
+func (r *BatchResultsReader) Err() error { return r.err }
+
+// Close frees the connection. It is safe to call more than once.
+func (r *BatchResultsReader) Close() error {
+	r.done = true
+	if r.body == nil {
+		return nil
+	}
+	err := r.body.Close()
+	r.body = nil
+	return err
 }
 
 // Cancel cancels a batch with POST /v1/batches/{id}/cancel. A draft, or a
@@ -372,7 +445,7 @@ func (c *Client) RunBatch(ctx context.Context, reqs []BatchRequest, opts RunBatc
 		return nil, nil, c.err
 	}
 	b := c.Batches()
-	lines, err := c.batchLines(ctx, reqs)
+	lines, err := c.batchLines(ctx, reqs, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -417,22 +490,13 @@ func (c *Client) RunBatch(ctx context.Context, reqs []BatchRequest, opts RunBatc
 // batchLines checks every request, then places each line's images (inline
 // or uploaded, per line) and encodes the lines, each ending in a newline.
 // Nothing is sent when a request is invalid.
-func (c *Client) batchLines(ctx context.Context, reqs []BatchRequest) ([][]byte, error) {
-	if err := c.checkLines(reqs); err != nil {
+func (c *Client) batchLines(ctx context.Context, reqs []BatchRequest, allowEmpty bool) ([][]byte, error) {
+	preps, err := c.prepareBatch(reqs, allowEmpty)
+	if err != nil {
 		return nil, err
 	}
-	preps := make([]*prepared, len(reqs))
 	withImages := false
-	for i := range reqs {
-		p, err := c.prepare(reqs[i].Request, false, reqs[i].CustomID)
-		if err != nil {
-			var apiErr *Error
-			if errors.As(err, &apiErr) {
-				return nil, err
-			}
-			return nil, fmt.Errorf("decisionnode: batch request %d: %w", i, err)
-		}
-		preps[i] = p
+	for _, p := range preps {
 		withImages = withImages || len(p.images) > 0
 	}
 	lines := make([][]byte, len(preps))
@@ -472,6 +536,31 @@ func (c *Client) batchLines(ctx context.Context, reqs []BatchRequest) ([][]byte,
 		}
 	}
 	return lines, nil
+}
+
+// prepareBatch checks the requests of one create or add call, the call's
+// custom_id rules first and then each line as a decide request, and encodes
+// them up to their images. Nothing is sent or uploaded.
+func (c *Client) prepareBatch(reqs []BatchRequest, allowEmpty bool) ([]*prepared, error) {
+	if len(reqs) == 0 && !allowEmpty {
+		return nil, usageError("The call holds no requests.")
+	}
+	if err := c.checkLines(reqs); err != nil {
+		return nil, err
+	}
+	preps := make([]*prepared, len(reqs))
+	for i := range reqs {
+		p, err := c.prepare(reqs[i].Request, false, reqs[i].CustomID)
+		if err != nil {
+			var apiErr *Error
+			if errors.As(err, &apiErr) {
+				return nil, err
+			}
+			return nil, fmt.Errorf("decisionnode: batch request %d: %w", i, err)
+		}
+		preps[i] = p
+	}
+	return preps, nil
 }
 
 // checkLines applies the custom_id rules of one call, lines numbered from 1,
