@@ -131,8 +131,8 @@ type Evidence struct {
 	// server sent none.
 	LatencyMs *float64
 	// BilledCalls is the calls of this booster billed on this request: one
-	// per image read with status ok, 0 for a picture read in the last hour
-	// or a booster that timed out. Nil when the server sent none.
+	// per image read with status ok, 0 for a booster that timed out or
+	// failed. Nil when the server sent none.
 	BilledCalls *int
 	// Results holds one reading per image read: an *AgeReading, an
 	// *AIGeneratedReading, or an *UnknownReading. Empty, never nil, unless

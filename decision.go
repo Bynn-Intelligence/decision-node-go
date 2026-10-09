@@ -69,8 +69,7 @@ type Usage struct {
 	// Nil for a request without boosters.
 	BoosterTokens *int `json:"booster_tokens"`
 	// Boosters is the number of booster calls billed: one per booster and
-	// image read with status ok, a picture read in the last hour not billed
-	// again. Nil for a request without boosters.
+	// image read with status ok. Nil for a request without boosters.
 	Boosters *int `json:"boosters"`
 }
 
