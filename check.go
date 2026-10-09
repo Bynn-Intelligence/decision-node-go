@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"unicode/utf8"
 )
 
 // The API's fixed question limits, checked locally before any request.
@@ -455,7 +456,7 @@ func (qc *questionCheck) number(id string, q map[string]json.RawMessage, raw []b
 }
 
 // checkImages checks a request's images against the API's fixed rules: ids
-// present and unique, URLs https and fetchable by the server's rules, local
+// present, at most 64 characters and unique, URLs https and fetchable by the server's rules, local
 // bytes JPEG, PNG or WebP by their first bytes and matching a declared type,
 // at most 10 MB and 40 megapixels. Their count is one of the request's 422
 // entries (countEntries).
@@ -464,6 +465,9 @@ func checkImages(images []Image, lim limits) error {
 	for i, img := range images {
 		if img.id == "" {
 			return usageError(fmt.Sprintf("Image %d needs an id.", i))
+		}
+		if utf8.RuneCountInString(img.id) > MaxImageIDChars {
+			return usageError(fmt.Sprintf("Image %d: its id is longer than %d characters.", i, MaxImageIDChars))
 		}
 		if seen[img.id] {
 			return usageError("Duplicate image id: " + img.id)

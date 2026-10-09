@@ -194,6 +194,10 @@ func newError(status int, header http.Header, body []byte) error {
 	var parsed any
 	if len(body) > 0 && json.Unmarshal(body, &parsed) == nil {
 		base.Body = parsed
+	} else {
+		// Not JSON (an edge's or a proxy's page, or no body): classed by its
+		// status alone, the body read into no field.
+		base.msg = statusMessage(status, base.RequestID)
 	}
 	var entries []any
 	var category string
@@ -243,6 +247,29 @@ func newError(status int, header http.Header, body []byte) error {
 	default:
 		return base
 	}
+}
+
+// statusTexts are the words of an error status whose body is not JSON, the
+// same in every DecisionNode SDK.
+var statusTexts = map[int]string{
+	400: "Bad Request", 401: "Unauthorized", 402: "Payment Required", 403: "Forbidden",
+	404: "Not Found", 405: "Method Not Allowed", 408: "Request Timeout", 409: "Conflict",
+	410: "Gone", 413: "Content Too Large", 422: "Unprocessable Content", 429: "Too Many Requests",
+	500: "Internal Server Error", 502: "Bad Gateway", 503: "Service Unavailable",
+	504: "Gateway Timeout", 529: "Overloaded",
+}
+
+// statusMessage describes an error whose body is not JSON: "HTTP 413 Content
+// Too Large", then " (request id <id>)" when the response has one.
+func statusMessage(status int, requestID string) string {
+	msg := "HTTP " + strconv.Itoa(status)
+	if text, ok := statusTexts[status]; ok {
+		msg += " " + text
+	}
+	if requestID != "" {
+		msg += " (request id " + requestID + ")"
+	}
+	return msg
 }
 
 // maxRetryAfter caps the wait a server may ask for.

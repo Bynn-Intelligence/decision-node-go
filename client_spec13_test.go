@@ -436,3 +436,77 @@ func TestFallback(t *testing.T) {
 		t.Fatalf("ordinary answer: %v %+v %s", err, d, rec.bodies[2])
 	}
 }
+
+// An error body that is not JSON is classed by its status alone, with the
+// client's own words and no field read from the body.
+func TestErrorBodyNotJSON(t *testing.T) {
+	cases := []struct {
+		status  int
+		id      string
+		check   func(error) bool
+		message string
+	}{
+		{413, "", func(err error) bool { var e *dn.RequestTooLargeError; return errors.As(err, &e) }, "HTTP 413 Content Too Large"},
+		{400, "req_1", func(err error) bool {
+			var e *dn.BadRequestError
+			var c *dn.ContextLimitError
+			return errors.As(err, &e) && !errors.As(err, &c)
+		}, "HTTP 400 Bad Request (request id req_1)"},
+		{403, "", func(err error) bool {
+			var e *dn.PermissionDeniedError
+			var r *dn.RefusalError
+			return errors.As(err, &e) && !errors.As(err, &r)
+		}, "HTTP 403 Forbidden"},
+		{422, "", func(err error) bool { var e *dn.ValidationError; return errors.As(err, &e) && e.Entries == nil }, "HTTP 422 Unprocessable Content"},
+		{418, "req_2", func(err error) bool { _, ok := err.(*dn.Error); return ok }, "HTTP 418 (request id req_2)"},
+	}
+	for _, tc := range cases {
+		for _, body := range []string{"<html><body>busy</body></html>", ""} {
+			srv, rec := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
+				if tc.id != "" {
+					w.Header().Set("x-request-id", tc.id)
+				}
+				w.Header().Set("x-decisionnode-error", "from the edge")
+				w.Header().Set("content-type", "text/html")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(body))
+			})
+			_, err := client(t, srv.URL).Decide(context.Background(), dn.Request{Questions: oneTruth()})
+			var base *dn.Error
+			if !tc.check(err) || !errors.As(err, &base) || err.Error() != tc.message || base.ErrorType != "" ||
+				base.RequestID != tc.id || base.Reason != "from the edge" || base.Body != nil || rec.count() != 1 {
+				t.Fatalf("%d %q: %T %q after %d attempts", tc.status, body, err, err, rec.count())
+			}
+		}
+	}
+	// A JSON envelope without a message keeps "".
+	srv, _ := server(t, func(w http.ResponseWriter, r *http.Request, n int) { respond(w, 400, `{}`, nil) })
+	if _, err := client(t, srv.URL).Decide(context.Background(), dn.Request{Questions: oneTruth()}); err == nil || err.Error() != "" {
+		t.Fatalf("empty envelope: %q", err)
+	}
+}
+
+func TestImageIDOfAtMost64Characters(t *testing.T) {
+	c := client(t, "https://api.example.com")
+	url := "https://files.example.com/a.jpg"
+	for _, id := range []string{strings.Repeat("a", 64), strings.Repeat("\U00020000", 64)} {
+		if err := c.CheckDecide(dn.Request{Questions: oneTruth(), Images: []dn.Image{dn.ImageURL(id, url)}}); err != nil {
+			t.Fatalf("64 code points: %v", err)
+		}
+	}
+	long := strings.Repeat("a", 65)
+	for _, imgs := range [][]dn.Image{
+		{dn.ImageURL("first", url), dn.ImageURL(long, url)},
+		{dn.ImageURL(long, url), dn.ImageURL(long, url)}, // too long before it is a duplicate
+	} {
+		err := c.CheckDecide(dn.Request{Questions: oneTruth(), Images: imgs})
+		var bad *dn.BadRequestError
+		want := "Image 1: its id is longer than 64 characters."
+		if imgs[0].ID() == long {
+			want = "Image 0: its id is longer than 64 characters."
+		}
+		if !errors.As(err, &bad) || bad.ErrorType != "api_usage_error" || bad.Error() != want {
+			t.Fatalf("65 code points: %v", err)
+		}
+	}
+}
