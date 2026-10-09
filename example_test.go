@@ -291,8 +291,8 @@ func ExampleBooster() {
 			dn.ImageURL("listing", "https://files.example.com/listings/4411/photo.jpg"),
 		},
 		Boosters: []any{
-			dn.BoosterAge,
-			dn.Booster{Name: dn.BoosterAIGenerated, Images: []string{"listing"}, Require: dn.Ptr(true)},
+			"age",
+			dn.Booster{Name: "ai_generated", Images: []string{"listing"}, Require: dn.Ptr(true)},
 		},
 		Questions: dn.Questions{
 			dn.Q("adult", dn.Truth("Is the person in `selfie` an adult?")),

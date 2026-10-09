@@ -10,13 +10,15 @@ Implements version 1.3 of the DecisionNode SDK surface: boosters and fine-tuned 
 
 ### Added
 
-- Boosters: `Request.Boosters` takes up to 4 boosters, in order, each a name (`BoosterAge`, `BoosterAIGenerated`, or any string), a `Booster` (`Name`, `Images`, `Require` as a `*bool`, `Options`, each left out of the wire form when nil) or a booster in its JSON wire form. The helper requests, `DecideMany` and batch requests take them as `Decide` does; sessions do not. Without boosters the request body is unchanged. Nothing about boosters is checked locally except the API's nesting limit, which counts them.
+- Boosters: `Request.Boosters` takes up to 4 boosters, in order, each a name (`BoosterAge`, `BoosterAIGenerated`, or any string), a `Booster` (`Name`, `Images`, `Require` as a `*bool`, `Options`, sent as `{"name", "images", "require", "options"}`, each left out when nil) or a booster in its JSON wire form. The helper requests, `DecideMany` and batch requests take them as `Decide` does; sessions do not. Without boosters the request body is unchanged. Nothing about boosters is checked locally except the API's nesting limit, which counts them.
 - `Decision.Evidence`, an `EvidenceList` in the request's order with `Get(name)`: `Evidence` with `Booster`, `Version`, `Status`, `LatencyMs` and `Results`, each result an `AgeReading`, an `AIGeneratedReading` (with `TopGenerator`, nil unless the picture reads as likely generated, `C2PASigner` and `C2PA`) or, for a booster this version does not know or a reading with a field missing or of the wrong type, an `UnknownReading` with its raw fields. Nil when the request named no boosters.
 - `Usage.BoosterTokens` and `Usage.Boosters`, nil for a request without boosters.
 - `Error.Boosters` on every error: the `x-decisionnode-boosters` header as `BoosterStatus` entries (`Name`, `Status`, `LatencyMs`) in the request's order, so a caller sees which required booster failed. `ParseBoosters` reads the same header of a decision.
 - Fine-tuned models: a fine-tuned model's name is sent as given in `Model`, and `Decision.Model` carries the version that answered. `ModelInfo` gains `FineTuned` (nil for a catalogue model), `Base`, `AdapterVersion` and `Status`; `Version` stays the pinned name.
 
-- The API's 25 MiB body limit: `MaxBodyBytes` (26,214,400 bytes) and `RequestTooLargeError`. A request body, or a batch line, over it is refused before anything is sent, and the API's 413 is the same error, never retried. Inline images and video frames count toward it; uploaded images and URLs do not, and local images at or above the inline threshold are uploaded.
+- The API's 25 MiB body limit: `MaxBodyBytes` (26,214,400 bytes) and `RequestTooLargeError`. A request body, or a batch line, over it is refused before anything is sent or uploaded (measured as it would go out, an image to upload by its upload id), and the API's 413 is the same error, never retried. Inline images and video frames count toward it; uploaded images and URLs do not, and local images at or above the inline threshold are uploaded.
+
+- Fallback: `Request.Fallback` (and the helper requests', `DecideMany`'s and batch lines'), sent as `"fallback": true | false` only when set; `Fallback: Ptr(false)` makes a request for `decisionnode-1.0` wait for its own model (the 529, retried as any) rather than be answered by `decisionnode-1.0-flash`. `Decision.Fallback` (`ServedModel`, `RequestedModel`) from the `x-decisionnode-fallback` and `x-decisionnode-requested-model` headers, nil on an ordinary answer.
 
 ### Changed
 

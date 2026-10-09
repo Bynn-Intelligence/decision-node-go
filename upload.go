@@ -206,6 +206,52 @@ func (c *Client) placeImages(ctx context.Context, images []Image, withID bool) (
 	return p, nil
 }
 
+// uploadIDChars is the length of an upload id, upl_ and 32 hex digits.
+const uploadIDChars = 36
+
+// imagesSize is the length of the body's `,"images":[...]` member as
+// placeImages would write it, without uploading anything: an image it would
+// upload is counted by an upload id's length.
+func (c *Client) imagesSize(images []Image) int {
+	if len(images) == 0 {
+		return 0
+	}
+	n := len(`,"images":[]`) + len(images) - 1
+	total := 0
+	var local []int
+	for i, img := range images {
+		switch {
+		case img.url != "":
+			n += len(urlWire(img.id, img.url))
+		case img.uploadID != "":
+			n += len(uploadWire(img.id, img.uploadID, img.mediaType, true))
+		default:
+			total += len(img.src.data)
+			local = append(local, i)
+		}
+	}
+	upload := total >= c.inlineThreshold
+	byID := len(uploadWire("", strings.Repeat("u", uploadIDChars), "", true)) - len(appendIDMember(nil, ""))
+	now := c.now()
+	for _, i := range local {
+		img := images[i]
+		if upload {
+			n += byID + len(appendIDMember(nil, img.id))
+			continue
+		}
+		if !c.uploads.empty() {
+			if _, ok := c.uploads.get(img.cacheKey(), now); ok {
+				n += byID + len(appendIDMember(nil, img.id))
+				continue
+			}
+		}
+		// {"id":...,"media_type":"...","data":"<base64>"}
+		n += len(appendIDMember(nil, img.id)) + len(`{,"media_type":"","data":""}`) +
+			len(img.wireMediaType()) + base64.StdEncoding.EncodedLen(len(img.src.data))
+	}
+	return n
+}
+
 // Upload uploads local images, whatever their size, and returns the upload
 // of each, in order: its upload_id and when it expires. The images not in the
 // cache go in one POST /v1/uploads, then one PUT each, in parallel. An image

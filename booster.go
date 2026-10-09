@@ -39,12 +39,12 @@ type Booster struct {
 	Options map[string]any
 }
 
-// MarshalJSON writes the booster in its wire form: {"booster", "images"?,
+// MarshalJSON writes the booster in its wire form: {"name", "images"?,
 // "require"?, "options"?}.
 func (b Booster) MarshalJSON() ([]byte, error) {
 	var buf bytes.Buffer
 	buf.WriteByte('{')
-	if err := writeMember(&buf, "booster", b.Name); err != nil {
+	if err := writeMember(&buf, "name", b.Name); err != nil {
 		return nil, err
 	}
 	if b.Images != nil {

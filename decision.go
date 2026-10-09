@@ -29,6 +29,10 @@ type Decision struct {
 	// sent: one when it read a video at a lower rate or resolution than
 	// asked. Empty, never nil, when there are none.
 	Warnings []string
+	// Fallback says that the API answered a request for one model with
+	// another, from the x-decisionnode-fallback and
+	// x-decisionnode-requested-model headers. Nil on an ordinary answer.
+	Fallback *Fallback
 	// Evidence holds what each booster the request named read, in the
 	// request's order; Evidence.Get("age") reads one by name. Nil when the
 	// request named none.
@@ -37,6 +41,16 @@ type Decision struct {
 	Raw map[string]any
 	// Header holds the response headers.
 	Header http.Header
+}
+
+// Fallback is how a request was answered by another model than the one it
+// asked for: decisionnode-1.0-flash for decisionnode-1.0 when no worker could
+// take the request at once.
+type Fallback struct {
+	// ServedModel is the model that answered, as Decision.Model.
+	ServedModel string
+	// RequestedModel is the model the request asked for.
+	RequestedModel string
 }
 
 // Usage is the token count of a request and, for a request with videos or
@@ -348,6 +362,9 @@ func parseDecision(body []byte, header http.Header) (*Decision, error) {
 				d.Warnings = append(d.Warnings, s)
 			}
 		}
+	}
+	if served := strings.TrimSpace(header.Get("x-decisionnode-fallback")); served != "" {
+		d.Fallback = &Fallback{ServedModel: served, RequestedModel: strings.TrimSpace(header.Get("x-decisionnode-requested-model"))}
 	}
 	if v := strings.TrimSpace(header.Get("x-decisionnode-latency-ms")); v != "" {
 		if ms, err := strconv.ParseFloat(v, 64); err == nil {

@@ -140,7 +140,7 @@ Numbers are passed through exactly as received: a probability list may read 0.82
 | `Models(ctx)` | The models your key can use, with their published limits, as `[]dn.ModelInfo`. The session, batch, number and upload limits are also typed fields (`Sessions`, `Batch`, `NumberMaxGridValues`, ...), and your workspace's fine-tuned models are listed beside the catalogue's (see [Fine-tuned models](#fine-tuned-models)). |
 | `DecideRaw(ctx, body)` | Sends a body exactly as given and returns the parsed response. For API fields this version does not know yet. |
 
-`Check`, `Classify`, `Score`, `Number` and `Gate` take `Images`, `Videos`, `Model` and `Boosters` like `Decide`. `Check`, `Classify`, `Score` and `Number` promise a typed answer, so when their own answer is missing or malformed they return a `*ServerError` with the response's status, `RequestID` and `Reason`. `Decide` returns such an answer as an `*UnknownAnswer` instead.
+`Check`, `Classify`, `Score`, `Number` and `Gate` take `Images`, `Videos`, `Model`, `Boosters` and `Fallback` like `Decide`. `Check`, `Classify`, `Score` and `Number` promise a typed answer, so when their own answer is missing or malformed they return a `*ServerError` with the response's status, `RequestID` and `Reason`. `Decide` returns such an answer as an `*UnknownAnswer` instead.
 
 A `*Decision` holds `Answers`, `Model` (the resolved version), `Usage.InputTokens` and `Usage.OutputTokens` (`*int`), `RequestID`, `LatencyMs` (`*float64`, the server's time), `Safety`, `Warnings` and `Raw` (the parsed body). For a request with videos, `Usage.VideoFrames` (`*int`) is the number of frames read and `Usage.VideoSeconds` (`*float64`) the seconds of the windows read, and `Warnings` holds the server's notes exactly as sent when it read a video at a lower rate or resolution than asked (empty, never nil, when there are none). For a request with boosters, `Evidence` holds what each booster read, and `Usage.BoosterTokens` and `Usage.Boosters` (`*int`) the readings' tokens and the booster calls billed (see [Boosters](#boosters)). A value the server did not send is `nil`, never 0.
 
@@ -245,10 +245,7 @@ d, err := client.Decide(ctx, dn.Request{
 		dn.ImageURL("selfie", "https://files.example.com/signup/88/selfie.jpg"),
 		dn.ImageURL("listing", "https://files.example.com/listings/4411/photo.jpg"),
 	},
-	Boosters: []any{
-		dn.BoosterAge,
-		dn.Booster{Name: dn.BoosterAIGenerated, Images: []string{"listing"}, Require: dn.Ptr(true)},
-	},
+	Boosters: []any{"age", "ai_generated"},
 	Questions: dn.Questions{
 		dn.Q("adult", dn.Truth("Is the person in `selfie` an adult?")),
 		dn.Q("synthetic", dn.Truth("Is `listing` AI-generated?")),
@@ -272,7 +269,16 @@ for _, r := range d.Evidence.Get("ai_generated").Results {
 fmt.Println(*d.Usage.BoosterTokens, *d.Usage.Boosters)
 ```
 
-`Request.Boosters` holds up to 4 boosters, each at most once, in the order you give: a booster's name as a string, a `dn.Booster`, or a booster in its JSON wire form (a `map[string]any`). Names are plain strings, so a booster added to the API later works with this version too.
+`Request.Boosters` holds up to 4 boosters, each at most once, in the order you give, usually by name (`dn.BoosterAge` and `dn.BoosterAIGenerated` name the two). Names are plain strings, so a booster added to the API later works with this version too. A booster that needs a setting is a `dn.Booster`:
+
+```go
+Boosters: []any{
+	"age",
+	dn.Booster{Name: "ai_generated", Images: []string{"listing"}, Require: dn.Ptr(true)},
+},
+```
+
+It is sent as `{"name": "ai_generated", "images": ["listing"], "require": true}`, and a booster in that JSON wire form (a `map[string]any`) is accepted too.
 
 | `dn.Booster` field | Sends |
 |---|---|
@@ -286,6 +292,10 @@ fmt.Println(*d.Usage.BoosterTokens, *d.Usage.Boosters)
 Boosters read images in every form an image takes: URL, inline bytes and upload. Every question sees every reading. The helpers, `DecideMany` and batch lines take boosters as `Decide` does; sessions do not. The SDK checks nothing about boosters before sending: which boosters exist and which your workspace may use is the API's to answer, before any booster runs and before any charge. Every booster is on for a new workspace, and an owner or admin can turn one off in the console.
 
 A booster call costs USD 0.002: one call per booster and image read with status `ok`. A picture the same booster read for your workspace in the last hour is not billed again, a booster that timed out or failed is free, and a request the safety check refuses pays for none. The readings' tokens are input tokens at the model's price.
+
+### Fallback
+
+When no worker can take a request for `decisionnode-1.0` at once, the API answers it with `decisionnode-1.0-flash` rather than make it wait. `d.Model` is then the model that answered, and `d.Fallback` says so: `ServedModel` and `RequestedModel`, from the `x-decisionnode-fallback` and `x-decisionnode-requested-model` headers; on an ordinary answer it is nil. To have such a request wait for its own model instead, set `Fallback: dn.Ptr(false)` on the request (the helpers and batch lines take it too): it then gets the 529, an `*dn.OverloadedError` retried like any other. Left nil, nothing is sent and the API's default applies.
 
 ### Fine-tuned models
 

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strconv"
 )
 
 // prepared is a request checked against the API's fixed rules and encoded up
@@ -125,9 +126,12 @@ func (c *Client) prepare(req Request, customID *string) (*prepared, error) {
 	head.WriteString(`,"questions":`)
 	head.Write(questions)
 	head.Write(boosters)
-	// The body without its images, before any upload: images only add to it,
-	// and the whole body is checked again once they are placed.
-	if err := checkBodySize(head.Len() + len(videosJSON) + 1); err != nil {
+	if req.Fallback != nil {
+		head.WriteString(`,"fallback":` + strconv.FormatBool(*req.Fallback))
+	}
+	// The body as it will go out, before anything is uploaded: an image to
+	// upload counted by its upload id.
+	if err := checkBodySize(head.Len() + len(videosJSON) + 1 + c.imagesSize(req.Images)); err != nil {
 		return nil, err
 	}
 	return &prepared{head: head.Bytes(), videos: videosJSON, images: req.Images}, nil

@@ -35,7 +35,7 @@ func TestBoostersWireForm(t *testing.T) {
 			dn.BoosterAge,
 			dn.Booster{Name: dn.BoosterAIGenerated, Images: []string{"c3d4"}, Require: dn.Ptr(true)},
 			&dn.Booster{Name: "objects", Options: map[string]any{"min": 0.5}},
-			map[string]any{"booster": "text"},
+			map[string]any{"name": "text"},
 			dn.Booster{Name: "faces", Require: dn.Ptr(false)},
 		},
 	})
@@ -43,7 +43,7 @@ func TestBoostersWireForm(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := `{"model":"decisionnode-1.0-flash@acme/fraud:3","state":"","questions":{"q":{"type":"truth","instructions":"?"}},` +
-		`"boosters":["age",{"booster":"ai_generated","images":["c3d4"],"require":true},{"booster":"objects","options":{"min":0.5}},{"booster":"text"},{"booster":"faces","require":false}]}`
+		`"boosters":["age",{"name":"ai_generated","images":["c3d4"],"require":true},{"name":"objects","options":{"min":0.5}},{"name":"text"},{"name":"faces","require":false}]}`
 	if got := string(rec.bodies[0]); got != want {
 		t.Fatalf("body\n got %s\nwant %s", got, want)
 	}
@@ -355,5 +355,83 @@ func TestBodyLimit(t *testing.T) {
 	var tooLarge *dn.RequestTooLargeError
 	if !errors.As(err, &tooLarge) || tooLarge.Status != 413 || tooLarge.RequestID != "req_413" || rec413.count() != 1 {
 		t.Fatalf("413: %v after %d attempts", err, rec413.count())
+	}
+}
+
+// The body is measured as it will go out, before anything is uploaded: an
+// inline image by its base64, an image to upload by its upload id.
+func TestBodyLimitCountsImagesAsSent(t *testing.T) {
+	for _, threshold := range []int{dn.DefaultInlineThreshold, 0} {
+		s := newStorageServer(t)
+		c := client(t, s.srv.URL, dn.WithInlineThreshold(threshold))
+		ctx := context.Background()
+		png := fixture(t, "3x2.png")
+		req := func(state string) dn.Request {
+			return dn.Request{State: state, Questions: oneTruth(), Images: []dn.Image{dn.ImageData("scan", png, "")}}
+		}
+		if _, err := c.Decide(ctx, req("")); err != nil {
+			t.Fatal(err)
+		}
+		s.mu.Lock()
+		overhead := len(s.decides[0])
+		presigns := s.presigns
+		s.mu.Unlock()
+		// A cached upload goes by the same id length, so a fresh client keeps
+		// the count exact for the uploaded case.
+		c = client(t, s.srv.URL, dn.WithInlineThreshold(threshold))
+		over := strings.Repeat("x", dn.MaxBodyBytes-overhead+1)
+		var big *dn.RequestTooLargeError
+		if _, err := c.Decide(ctx, req(over)); !errors.As(err, &big) {
+			t.Fatalf("threshold %d, one byte over: %v", threshold, err)
+		}
+		if err := c.CheckDecide(req(over)); !errors.As(err, &big) {
+			t.Fatalf("threshold %d, check: %v", threshold, err)
+		}
+		s.mu.Lock()
+		if len(s.decides) != 1 || s.presigns != presigns {
+			t.Fatalf("threshold %d: sent or uploaded before refusing", threshold)
+		}
+		s.mu.Unlock()
+		if _, err := c.Decide(ctx, req(over[1:])); err != nil {
+			t.Fatalf("threshold %d, at the limit: %v", threshold, err)
+		}
+		s.mu.Lock()
+		if n := len(s.decides[1]); n != dn.MaxBodyBytes {
+			t.Fatalf("threshold %d: sent %d bytes", threshold, n)
+		}
+		s.mu.Unlock()
+	}
+}
+
+func TestFallback(t *testing.T) {
+	srv, rec := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		h := map[string]string{"x-decisionnode-model": "decisionnode-1.0-flash"}
+		if n == 1 {
+			h["x-decisionnode-fallback"] = "decisionnode-1.0-flash"
+			h["x-decisionnode-requested-model"] = "decisionnode-1.0"
+		}
+		respond(w, 200, `{"model":"decisionnode-1.0-flash","answers":{"check":{"type":"truth","truth":0.5}}}`, h)
+	})
+	c := client(t, srv.URL)
+	ctx := context.Background()
+	d, err := c.Decide(ctx, dn.Request{Questions: oneTruth(), Model: "decisionnode-1.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Model != "decisionnode-1.0-flash" || d.Fallback == nil || d.Fallback.ServedModel != "decisionnode-1.0-flash" || d.Fallback.RequestedModel != "decisionnode-1.0" {
+		t.Fatalf("fallback answer: %+v %+v", d, d.Fallback)
+	}
+	if strings.Contains(string(rec.bodies[0]), "fallback") {
+		t.Fatalf("no fallback key when left out: %s", rec.bodies[0])
+	}
+	if _, err := c.Check(ctx, dn.CheckRequest{Instructions: "?", Fallback: dn.Ptr(false)}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(string(rec.bodies[1]), `,"fallback":false}`) {
+		t.Fatalf("check body: %s", rec.bodies[1])
+	}
+	d, err = c.Decide(ctx, dn.Request{Questions: oneTruth(), Fallback: dn.Ptr(true)})
+	if err != nil || d.Fallback != nil || !strings.HasSuffix(string(rec.bodies[2]), `,"fallback":true}`) {
+		t.Fatalf("ordinary answer: %v %+v %s", err, d, rec.bodies[2])
 	}
 }

@@ -504,6 +504,8 @@ type CheckRequest struct {
 	Model   string
 	// Boosters are the boosters that read the images first, as on Request.
 	Boosters []any
+	// Fallback is the request's fallback setting, as on Request.
+	Fallback *bool
 }
 
 // Check asks one truth question.
@@ -515,6 +517,7 @@ func (c *Client) Check(ctx context.Context, r CheckRequest) (*TruthAnswer, error
 		Videos:    r.Videos,
 		Model:     r.Model,
 		Boosters:  r.Boosters,
+		Fallback:  r.Fallback,
 	})
 	if err != nil {
 		return nil, err
@@ -536,6 +539,8 @@ type ClassifyRequest struct {
 	Model   string
 	// Boosters are the boosters that read the images first, as on Request.
 	Boosters []any
+	// Fallback is the request's fallback setting, as on Request.
+	Fallback *bool
 }
 
 // Classify asks one choice question.
@@ -547,6 +552,7 @@ func (c *Client) Classify(ctx context.Context, r ClassifyRequest) (*ChoiceAnswer
 		Videos:    r.Videos,
 		Model:     r.Model,
 		Boosters:  r.Boosters,
+		Fallback:  r.Fallback,
 	})
 	if err != nil {
 		return nil, err
@@ -568,6 +574,8 @@ type ScoreRequest struct {
 	Model  string
 	// Boosters are the boosters that read the images first, as on Request.
 	Boosters []any
+	// Fallback is the request's fallback setting, as on Request.
+	Fallback *bool
 }
 
 // Score asks one score question.
@@ -579,6 +587,7 @@ func (c *Client) Score(ctx context.Context, r ScoreRequest) (*ScoreAnswer, error
 		Videos:    r.Videos,
 		Model:     r.Model,
 		Boosters:  r.Boosters,
+		Fallback:  r.Fallback,
 	})
 	if err != nil {
 		return nil, err
@@ -601,6 +610,8 @@ type NumberRequest struct {
 	Model          string
 	// Boosters are the boosters that read the images first, as on Request.
 	Boosters []any
+	// Fallback is the request's fallback setting, as on Request.
+	Fallback *bool
 }
 
 // Number asks one number question, with the id "number".
@@ -612,6 +623,7 @@ func (c *Client) Number(ctx context.Context, r NumberRequest) (*NumberAnswer, er
 		Videos:    r.Videos,
 		Model:     r.Model,
 		Boosters:  r.Boosters,
+		Fallback:  r.Fallback,
 	})
 	if err != nil {
 		return nil, err
@@ -633,6 +645,8 @@ type GateRequest struct {
 	Model   string
 	// Boosters are the boosters that read the images first, as on Request.
 	Boosters []any
+	// Fallback is the request's fallback setting, as on Request.
+	Fallback *bool
 }
 
 // Gate judges an action before it runs with three questions: "risk" (a
@@ -640,7 +654,7 @@ type GateRequest struct {
 // (a choice of allow, confirm or block).
 func (c *Client) Gate(ctx context.Context, r GateRequest) (*Decision, error) {
 	state := gateState{Action: r.Action, Context: r.Context}
-	return c.Decide(ctx, Request{State: state, Questions: GateQuestions(), Images: r.Images, Videos: r.Videos, Model: r.Model, Boosters: r.Boosters})
+	return c.Decide(ctx, Request{State: state, Questions: GateQuestions(), Images: r.Images, Videos: r.Videos, Model: r.Model, Boosters: r.Boosters, Fallback: r.Fallback})
 }
 
 type gateState struct {

@@ -35,6 +35,11 @@ type Request struct {
 	// wire form. Their readings come back in Decision.Evidence. Empty sends
 	// no boosters field.
 	Boosters []any
+	// Fallback, set with Ptr(false), asks the API not to answer a request for
+	// decisionnode-1.0 with decisionnode-1.0-flash when no worker can take it
+	// at once: the request then gets the 529 instead. Nil leaves the field
+	// out, and the API's default, true, applies.
+	Fallback *bool
 }
 
 // Questions is an ordered list of questions, each with its id. Build it with Q:

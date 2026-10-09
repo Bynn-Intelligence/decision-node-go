@@ -536,6 +536,13 @@ func orderedPairs(v any) any {
 // expectation is an ordered expectation made plain, with orderedPairs applied.
 func expectation(v any) any { return plain(orderedPairs(v)) }
 
+func normFallback(f *dn.Fallback) any {
+	if f == nil {
+		return nil
+	}
+	return map[string]any{"served_model": f.ServedModel, "requested_model": f.RequestedModel}
+}
+
 func normDecision(d *dn.Decision) any {
 	var latency any
 	if d.LatencyMs != nil {
@@ -559,6 +566,7 @@ func normDecision(d *dn.Decision) any {
 		},
 		"warnings": d.Warnings,
 		"evidence": normEvidence(d.Evidence),
+		"fallback": normFallback(d.Fallback),
 		"safety":   normSafety(d.Safety),
 		"answers":  answers,
 		"raw":      d.Raw,
@@ -872,6 +880,14 @@ func decodeBoosters(v any, r refs) []any {
 	return out
 }
 
+// boolArg is a boolean argument, nil when absent.
+func boolArg(args *object, key string) *bool {
+	if v, ok := args.vals[key].(bool); ok {
+		return dn.Ptr(v)
+	}
+	return nil
+}
+
 func decodeQuestions(v any) dn.Questions {
 	o, _ := v.(*object)
 	qs := dn.Questions{}
@@ -960,6 +976,7 @@ func decodeRequest(root string, args *object, r refs) (dn.Request, error) {
 		Videos:    videos,
 		Model:     str(args.vals["model"]),
 		Boosters:  decodeBoosters(args.vals["boosters"], r),
+		Fallback:  boolArg(args, "fallback"),
 	}, err
 }
 
@@ -1209,6 +1226,7 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 			Videos:       videos,
 			Model:        str(args.vals["model"]),
 			Boosters:     decodeBoosters(args.vals["boosters"], r),
+			Fallback:     boolArg(args, "fallback"),
 		})
 	case "classify":
 		return c.Classify(ctx, dn.ClassifyRequest{
@@ -1219,6 +1237,7 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 			Videos:       videos,
 			Model:        str(args.vals["model"]),
 			Boosters:     decodeBoosters(args.vals["boosters"], r),
+			Fallback:     boolArg(args, "fallback"),
 		})
 	case "score":
 		return c.Score(ctx, dn.ScoreRequest{
@@ -1229,6 +1248,7 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 			Videos:       videos,
 			Model:        str(args.vals["model"]),
 			Boosters:     decodeBoosters(args.vals["boosters"], r),
+			Fallback:     boolArg(args, "fallback"),
 		})
 	case "number":
 		return c.Number(ctx, dn.NumberRequest{
@@ -1241,6 +1261,7 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 			Videos:       videos,
 			Model:        str(args.vals["model"]),
 			Boosters:     decodeBoosters(args.vals["boosters"], r),
+			Fallback:     boolArg(args, "fallback"),
 		})
 	case "gate":
 		return c.Gate(ctx, dn.GateRequest{
@@ -1250,6 +1271,7 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 			Videos:   videos,
 			Model:    str(args.vals["model"]),
 			Boosters: decodeBoosters(args.vals["boosters"], r),
+			Fallback: boolArg(args, "fallback"),
 		})
 	case "models":
 		return c.Models(ctx)
