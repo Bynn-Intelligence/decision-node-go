@@ -21,8 +21,9 @@ const (
 
 // Booster asks a booster to read the request's images before the decision,
 // with settings. Its reading is added to what the model sees as evidence and
-// comes back in Decision.Evidence. To name a booster with no settings, put
-// its name in Request.Boosters as a plain string ("age").
+// comes back in Decision.Evidence. A booster with no settings is named by its
+// name in Request.Boosters ("age"); a Booster with no field but Name is sent
+// the same way.
 type Booster struct {
 	// Name is the booster's name, such as BoosterAge.
 	Name string
@@ -40,8 +41,11 @@ type Booster struct {
 }
 
 // MarshalJSON writes the booster in its wire form: {"name", "images"?,
-// "require"?, "options"?}.
+// "require"?, "options"?}, or its bare name when no option is set.
 func (b Booster) MarshalJSON() ([]byte, error) {
+	if b.Images == nil && b.Require == nil && b.Options == nil {
+		return marshal(b.Name)
+	}
 	var buf bytes.Buffer
 	buf.WriteByte('{')
 	if err := writeMember(&buf, "name", b.Name); err != nil {
@@ -126,6 +130,10 @@ type Evidence struct {
 	// LatencyMs is how long the booster took, in milliseconds. Nil when the
 	// server sent none.
 	LatencyMs *float64
+	// BilledCalls is the calls of this booster billed on this request: one
+	// per image read with status ok, 0 for a picture read in the last hour
+	// or a booster that timed out. Nil when the server sent none.
+	BilledCalls *int
 	// Results holds one reading per image read: an *AgeReading, an
 	// *AIGeneratedReading, or an *UnknownReading. Empty, never nil, unless
 	// Status is "ok".
@@ -221,6 +229,9 @@ func parseEvidence(data json.RawMessage) EvidenceList {
 		e.Status, _ = m["status"].(string)
 		if f, ok := m["latency_ms"].(float64); ok {
 			e.LatencyMs = &f
+		}
+		if n, ok := wholeNumber(m["billed_calls"]); ok {
+			e.BilledCalls = &n
 		}
 		if list, ok := m["results"].([]any); ok {
 			for _, r := range list {

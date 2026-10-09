@@ -12,7 +12,7 @@ import (
 )
 
 const boostedBody = `{"model":"decisionnode-1.0","answers":{"q":{"type":"truth","truth":0.97}},` +
-	`"evidence":{"age":{"version":"age-v3","status":"ok","latency_ms":212,"results":[` +
+	`"evidence":{"age":{"version":"age-v3","status":"ok","latency_ms":212,"billed_calls":2,"results":[` +
 	`{"image":"a1b2","age_years":27,"low":22,"high":33,"confidence":0.81,"faces":1},{"image":"c3d4","faces":0}]},` +
 	`"ai_generated":{"version":"ai_generated-v2","status":"ok","latency_ms":340,"results":[` +
 	`{"image":"c3d4","generated":0.93,"confidence":0.86,"method":"inference","top_generator":{"name":"Generator A","probability":0.71},"c2pa_signer":null},` +
@@ -37,13 +37,14 @@ func TestBoostersWireForm(t *testing.T) {
 			&dn.Booster{Name: "objects", Options: map[string]any{"min": 0.5}},
 			map[string]any{"name": "text"},
 			dn.Booster{Name: "faces", Require: dn.Ptr(false)},
+			dn.Booster{Name: "objects_v2"},
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := `{"model":"decisionnode-1.0-flash@acme/fraud:3","state":"","questions":{"q":{"type":"truth","instructions":"?"}},` +
-		`"boosters":["age",{"name":"ai_generated","images":["c3d4"],"require":true},{"name":"objects","options":{"min":0.5}},{"name":"text"},{"name":"faces","require":false}]}`
+		`"boosters":["age",{"name":"ai_generated","images":["c3d4"],"require":true},{"name":"objects","options":{"min":0.5}},{"name":"text"},{"name":"faces","require":false},"objects_v2"]}`
 	if got := string(rec.bodies[0]); got != want {
 		t.Fatalf("body\n got %s\nwant %s", got, want)
 	}
@@ -114,7 +115,7 @@ func TestEvidenceAndBoosterUsage(t *testing.T) {
 		t.Fatalf("usage: %+v", d.Usage)
 	}
 	age := d.Evidence.Get("age")
-	if age.Version != "age-v3" || age.Status != "ok" || *age.LatencyMs != 212 || len(age.Results) != 2 {
+	if age.Version != "age-v3" || age.Status != "ok" || *age.LatencyMs != 212 || *age.BilledCalls != 2 || len(age.Results) != 2 || d.Evidence.Get("text").BilledCalls != nil {
 		t.Fatalf("age: %+v", age)
 	}
 	read := age.Results[0].(*dn.AgeReading)

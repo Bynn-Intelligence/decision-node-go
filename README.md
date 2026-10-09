@@ -278,7 +278,7 @@ Boosters: []any{
 },
 ```
 
-It is sent as `{"name": "ai_generated", "images": ["listing"], "require": true}`, and a booster in that JSON wire form (a `map[string]any`) is accepted too.
+It is sent as `{"name": "ai_generated", "images": ["listing"], "require": true}`, and a booster in that JSON wire form (a `map[string]any`) is accepted too. A `dn.Booster` with no field but `Name` is sent as the bare name.
 
 | `dn.Booster` field | Sends |
 |---|---|
@@ -287,7 +287,7 @@ It is sent as `{"name": "ai_generated", "images": ["listing"], "require": true}`
 | `Require` | `dn.Ptr(true)`: a booster that fails or does not answer in time fails the request with a 529 `*dn.OverloadedError` whose `ErrorType` is `booster_unavailable`, retried like any 529. Nil or `dn.Ptr(false)`: the decision runs without that reading, and its evidence says why. |
 | `Options` | The booster's settings. Neither booster has any today. |
 
-`d.Evidence` holds one `*dn.Evidence` per booster the request named, in the request's order, and `d.Evidence.Get(name)` finds one by name: `Booster` (its name), `Version` (the booster's version, such as `age-v3`), `Status` (`ok`; `timeout`, no answer in its time; `error`; `skipped`, none of the request's images is one it reads), `LatencyMs` and `Results`, one reading per image read, empty unless `Status` is `ok`. A reading of a booster this version does not know, or one with a field missing or of the wrong type, is a `*dn.UnknownReading` whose `Raw` holds its fields; the decision does not fail. Fields a reading adds that this version does not know are ignored. `Usage.BoosterTokens` is the readings' share of `Usage.InputTokens`, and `Usage.Boosters` the booster calls billed. Without boosters, `Evidence` and both usage fields are nil.
+`d.Evidence` holds one `*dn.Evidence` per booster the request named, in the request's order, and `d.Evidence.Get(name)` finds one by name: `Booster` (its name), `Version` (the booster's version, such as `age-v3`), `Status` (`ok`; `timeout`, no answer in its time; `error`; `skipped`, none of the request's images is one it reads), `LatencyMs`, `BilledCalls` (the calls of that booster billed on this request) and `Results`, one reading per image read, empty unless `Status` is `ok`. A reading of a booster this version does not know, or one with a field missing or of the wrong type, is a `*dn.UnknownReading` whose `Raw` holds its fields; the decision does not fail. Fields a reading adds that this version does not know are ignored. `Usage.BoosterTokens` is the readings' share of `Usage.InputTokens`, and `Usage.Boosters` the booster calls billed. Without boosters, `Evidence` and both usage fields are nil.
 
 Boosters read images in every form an image takes: URL, inline bytes and upload. Every question sees every reading. The helpers, `DecideMany` and batch lines take boosters as `Decide` does; sessions do not. The SDK checks nothing about boosters before sending: which boosters exist and which your workspace may use is the API's to answer, before any booster runs and before any charge. Every booster is on for a new workspace, and an owner or admin can turn one off in the console.
 

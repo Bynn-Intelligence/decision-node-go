@@ -487,7 +487,7 @@ func normEvidence(l dn.EvidenceList) any {
 		}
 		out = append(out, map[string]any{"name": e.Booster, "value": map[string]any{
 			"version": nilIfEmpty(e.Version), "status": nilIfEmpty(e.Status),
-			"latency_ms": floatOrNil(e.LatencyMs), "results": results,
+			"latency_ms": floatOrNil(e.LatencyMs), "billed_calls": intOrNil(e.BilledCalls), "results": results,
 		}})
 	}
 	return out
