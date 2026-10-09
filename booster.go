@@ -134,9 +134,11 @@ type Evidence struct {
 	// per image read with status ok, 0 for a booster that timed out or
 	// failed. Nil when the server sent none.
 	BilledCalls *int
-	// Results holds one reading per image read: an *AgeReading, an
-	// *AIGeneratedReading, or an *UnknownReading. Empty, never nil, unless
-	// Status is "ok".
+	// Results holds one reading per picture the booster was to read: an
+	// *AgeReading, an *AIGeneratedReading, or an *UnknownReading. A picture
+	// it did not read (it timed out or failed: {"image"}) or could not
+	// decode ({"image", "readable": false}) is an *UnknownReading, and
+	// Status says why. Empty, never nil, when there are none.
 	Results []Reading
 	// Raw is the evidence object as sent.
 	Raw map[string]any
