@@ -12,7 +12,9 @@
 // Images are best sent by URL (ImageURL); local images are checked before any
 // request and go inline when small or are uploaded once when large. Videos
 // travel as the frames the caller sampled, each with its time (Video,
-// VideoFrameData).
+// VideoFrameData). Boosters (Request.Boosters) read the images first and add
+// their readings to the decision as evidence (Decision.Evidence). A
+// workspace's fine-tuned models are named in Model like any other.
 //
 //	client := decisionnode.NewClient() // reads DECISIONNODE_API_KEY
 //

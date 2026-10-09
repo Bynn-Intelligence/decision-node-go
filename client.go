@@ -498,6 +498,8 @@ type CheckRequest struct {
 	Images  []Image
 	Videos  []any
 	Model   string
+	// Boosters are the boosters that read the images first, as on Request.
+	Boosters []any
 }
 
 // Check asks one truth question.
@@ -508,6 +510,7 @@ func (c *Client) Check(ctx context.Context, r CheckRequest) (*TruthAnswer, error
 		Images:    r.Images,
 		Videos:    r.Videos,
 		Model:     r.Model,
+		Boosters:  r.Boosters,
 	})
 	if err != nil {
 		return nil, err
@@ -527,6 +530,8 @@ type ClassifyRequest struct {
 	Images  []Image
 	Videos  []any
 	Model   string
+	// Boosters are the boosters that read the images first, as on Request.
+	Boosters []any
 }
 
 // Classify asks one choice question.
@@ -537,6 +542,7 @@ func (c *Client) Classify(ctx context.Context, r ClassifyRequest) (*ChoiceAnswer
 		Images:    r.Images,
 		Videos:    r.Videos,
 		Model:     r.Model,
+		Boosters:  r.Boosters,
 	})
 	if err != nil {
 		return nil, err
@@ -556,6 +562,8 @@ type ScoreRequest struct {
 	Images []Image
 	Videos []any
 	Model  string
+	// Boosters are the boosters that read the images first, as on Request.
+	Boosters []any
 }
 
 // Score asks one score question.
@@ -566,6 +574,7 @@ func (c *Client) Score(ctx context.Context, r ScoreRequest) (*ScoreAnswer, error
 		Images:    r.Images,
 		Videos:    r.Videos,
 		Model:     r.Model,
+		Boosters:  r.Boosters,
 	})
 	if err != nil {
 		return nil, err
@@ -586,6 +595,8 @@ type NumberRequest struct {
 	Images         []Image
 	Videos         []any
 	Model          string
+	// Boosters are the boosters that read the images first, as on Request.
+	Boosters []any
 }
 
 // Number asks one number question, with the id "number".
@@ -596,6 +607,7 @@ func (c *Client) Number(ctx context.Context, r NumberRequest) (*NumberAnswer, er
 		Images:    r.Images,
 		Videos:    r.Videos,
 		Model:     r.Model,
+		Boosters:  r.Boosters,
 	})
 	if err != nil {
 		return nil, err
@@ -615,6 +627,8 @@ type GateRequest struct {
 	Images  []Image
 	Videos  []any
 	Model   string
+	// Boosters are the boosters that read the images first, as on Request.
+	Boosters []any
 }
 
 // Gate judges an action before it runs with three questions: "risk" (a
@@ -622,7 +636,7 @@ type GateRequest struct {
 // (a choice of allow, confirm or block).
 func (c *Client) Gate(ctx context.Context, r GateRequest) (*Decision, error) {
 	state := gateState{Action: r.Action, Context: r.Context}
-	return c.Decide(ctx, Request{State: state, Questions: GateQuestions(), Images: r.Images, Videos: r.Videos, Model: r.Model})
+	return c.Decide(ctx, Request{State: state, Questions: GateQuestions(), Images: r.Images, Videos: r.Videos, Model: r.Model, Boosters: r.Boosters})
 }
 
 type gateState struct {

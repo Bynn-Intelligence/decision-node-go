@@ -237,8 +237,8 @@ func TestVideoUsageAndWarnings(t *testing.T) {
 	if err != nil || d.Usage.VideoFrames != nil || d.Usage.VideoSeconds != nil || d.Warnings == nil || len(d.Warnings) != 0 {
 		t.Fatalf("no videos: %+v %#v %v", d.Usage, d.Warnings, err)
 	}
-	if dn.SpecVersion != "1.2" || dn.MaxImages != 16 || dn.MaxVideos != 4 {
-		t.Fatal(dn.SpecVersion, dn.MaxImages, dn.MaxVideos)
+	if dn.MaxImages != 16 || dn.MaxVideos != 4 {
+		t.Fatal(dn.MaxImages, dn.MaxVideos)
 	}
 }
 

@@ -33,6 +33,10 @@ type Error struct {
 	Body any
 	// Header holds the response headers.
 	Header http.Header
+	// Boosters is how each booster of a request that named boosters ended,
+	// from the x-decisionnode-boosters header, in the request's order: it
+	// shows which required booster failed. Nil when the header is absent.
+	Boosters []BoosterStatus
 	// Err is the underlying cause, such as a network error, when there is one.
 	Err error
 
@@ -92,7 +96,8 @@ type RefusalError struct {
 
 func (e *RefusalError) Unwrap() error { return e.errorBase }
 
-// PermissionDeniedError is a 403 that is not a refusal.
+// PermissionDeniedError is a 403 that is not a refusal: a booster turned off
+// for the workspace (ErrorType booster_not_enabled), a suspended workspace.
 type PermissionDeniedError struct{ *errorBase }
 
 func (e *PermissionDeniedError) Unwrap() error { return e.errorBase }
@@ -137,7 +142,9 @@ func (e *SessionLimitError) Unwrap() error {
 	return &RateLimitError{errorBase: e.errorBase, RetryAfter: e.RetryAfter}
 }
 
-// OverloadedError is a 529: the service is busy. It is retried by default.
+// OverloadedError is a 529: the service is busy, or (ErrorType
+// booster_unavailable) a booster the request requires failed or did not
+// answer in time. It is retried by default.
 type OverloadedError struct {
 	*errorBase
 	// RetryAfter is the wait the server asked for, from retry-after-ms or
@@ -174,6 +181,7 @@ func newError(status int, header http.Header, body []byte) error {
 		RequestID: header.Get("x-request-id"),
 		Reason:    header.Get("x-decisionnode-error"),
 		Header:    header,
+		Boosters:  ParseBoosters(header),
 	}
 	var parsed any
 	if len(body) > 0 && json.Unmarshal(body, &parsed) == nil {

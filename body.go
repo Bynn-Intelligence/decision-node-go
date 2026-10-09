@@ -11,7 +11,8 @@ import (
 // to its images, which are placed last: inline, by URL or by upload_id, as
 // the inline threshold and the upload cache decide at send time.
 type prepared struct {
-	// head is the body without its videos, its images and its closing brace.
+	// head is the body without its videos, its images and its closing brace:
+	// up to its questions and boosters.
 	head []byte
 	// videos is the `,"videos":[...]` member, or empty. Frames always go
 	// inline: they are never uploaded or cached.
@@ -83,9 +84,13 @@ func (c *Client) prepare(req Request, customID *string) (*prepared, error) {
 	if err != nil {
 		return nil, err
 	}
+	boosters, boosterDepth, err := encodeBoosters(req.Boosters)
+	if err != nil {
+		return nil, err
+	}
 	// The server's order: the nesting limit, the 422 entries, the first 400,
 	// then the images, then the videos.
-	depth := max(jsonDepth(stateJSON)+1, jsonDepth(questions)+1, videoDepth)
+	depth := max(jsonDepth(stateJSON)+1, jsonDepth(questions)+1, videoDepth, boosterDepth)
 	if len(req.Images) > 0 {
 		depth = max(depth, 3)
 	}
@@ -119,6 +124,7 @@ func (c *Client) prepare(req Request, customID *string) (*prepared, error) {
 	head.Write(stateJSON)
 	head.WriteString(`,"questions":`)
 	head.Write(questions)
+	head.Write(boosters)
 	return &prepared{head: head.Bytes(), videos: videosJSON, images: req.Images}, nil
 }
 

@@ -11,7 +11,9 @@ import (
 type Decision struct {
 	// Answers holds one answer per question, by question id.
 	Answers map[string]Answer
-	// Model is the resolved model version that answered.
+	// Model is the resolved model version that answered; for a fine-tuned
+	// model, its name pinned to the version that answered
+	// (decisionnode-1.0-flash@acme/fraud:3).
 	Model string
 	// Usage is the token count of the request.
 	Usage Usage
@@ -27,14 +29,19 @@ type Decision struct {
 	// sent: one when it read a video at a lower rate or resolution than
 	// asked. Empty, never nil, when there are none.
 	Warnings []string
+	// Evidence holds what each booster the request named read, in the
+	// request's order; Evidence.Get("age") reads one by name. Nil when the
+	// request named none.
+	Evidence EvidenceList
 	// Raw is the parsed response body.
 	Raw map[string]any
 	// Header holds the response headers.
 	Header http.Header
 }
 
-// Usage is the token count of a request and, for a request with videos, what
-// was read of them. A value the server did not send is nil, never 0.
+// Usage is the token count of a request and, for a request with videos or
+// boosters, what was read of them. A value the server did not send is nil,
+// never 0.
 type Usage struct {
 	InputTokens  *int `json:"input_tokens"`
 	OutputTokens *int `json:"output_tokens"`
@@ -44,6 +51,13 @@ type Usage struct {
 	// VideoSeconds is the seconds of the videos' windows read, summed, as
 	// sent. Nil for a request without videos.
 	VideoSeconds *float64 `json:"video_seconds"`
+	// BoosterTokens is the share of InputTokens the boosters' readings take.
+	// Nil for a request without boosters.
+	BoosterTokens *int `json:"booster_tokens"`
+	// Boosters is the number of booster calls billed: one per booster and
+	// image read with status ok, a picture read in the last hour not billed
+	// again. Nil for a request without boosters.
+	Boosters *int `json:"boosters"`
 }
 
 // Answer is one answer of a Decision: a *TruthAnswer, a *ChoiceAnswer, a
@@ -239,6 +253,21 @@ type ModelInfo struct {
 	Version string
 	Alias   string
 
+	// FineTuned is true for one of the workspace's fine-tuned models, whose
+	// Name is <base>@<workspace>/<name>, pinned (":3") or not. Nil for a
+	// catalogue model.
+	FineTuned *bool
+	// Base is a fine-tuned model's base model, by its pinned id.
+	Base string
+	// AdapterVersion is a fine-tuned model's version number; for a name
+	// without a version, the version it resolves to. Nil for a catalogue
+	// model.
+	AdapterVersion *int
+	// Status is a fine-tuned model's status: "deployed" (it answers
+	// decisions), "ready" (trained and through its quality gate, not
+	// deployed), or any other value exactly as sent.
+	Status string
+
 	// NumberOneQuestionValues is the most grid values answered as one question.
 	NumberOneQuestionValues *int
 	// NumberMaxGridValues is the most values a number grid may hold.
@@ -294,9 +323,10 @@ func parseDecision(body []byte, header http.Header) (*Decision, error) {
 		return nil, err
 	}
 	var shape struct {
-		Model   string                     `json:"model"`
-		Answers map[string]json.RawMessage `json:"answers"`
-		Usage   Usage                      `json:"usage"`
+		Model    string                     `json:"model"`
+		Answers  map[string]json.RawMessage `json:"answers"`
+		Usage    Usage                      `json:"usage"`
+		Evidence json.RawMessage            `json:"evidence"`
 	}
 	if err := json.Unmarshal(body, &shape); err != nil {
 		return nil, err
@@ -308,6 +338,7 @@ func parseDecision(body []byte, header http.Header) (*Decision, error) {
 		RequestID: header.Get("x-request-id"),
 		Safety:    parseSafety(header.Values("x-decisionnode-safety")),
 		Warnings:  []string{},
+		Evidence:  parseEvidence(shape.Evidence),
 		Raw:       raw,
 		Header:    header,
 	}
@@ -422,6 +453,12 @@ func parseModels(body []byte) ([]ModelInfo, error) {
 		}
 		m.Version, _ = entry["version"].(string)
 		m.Alias, _ = entry["alias"].(string)
+		if b, ok := entry["fine_tuned"].(bool); ok {
+			m.FineTuned = &b
+		}
+		m.Base, _ = entry["base"].(string)
+		m.AdapterVersion = intField(entry, "adapter_version")
+		m.Status, _ = entry["status"].(string)
 		m.NumberOneQuestionValues = intField(entry, "number_one_question_values")
 		m.NumberMaxGridValues = intField(entry, "number_max_grid_values")
 		if r, ok := entry["number_default_range"].([]any); ok {

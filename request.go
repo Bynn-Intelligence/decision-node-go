@@ -25,8 +25,16 @@ type Request struct {
 	// frames the caller sampled: a Video, or a video in its JSON wire form
 	// (a map[string]any, a json.RawMessage). Every question sees every video.
 	Videos []any
-	// Model overrides the client's model for this call.
+	// Model overrides the client's model for this call: a model's name, or
+	// a fine-tuned model's name (decisionnode-1.0-flash@acme/fraud, or
+	// decisionnode-1.0-flash@acme/fraud:3 for one version), sent as given.
 	Model string
+	// Boosters are the boosters that read the request's images before the
+	// decision, up to 4, in this order: a booster's name (BoosterAge,
+	// "ai_generated"), a Booster with settings, or a booster in its JSON
+	// wire form. Their readings come back in Decision.Evidence. Empty sends
+	// no boosters field.
+	Boosters []any
 }
 
 // Questions is an ordered list of questions, each with its id. Build it with Q:

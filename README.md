@@ -6,6 +6,8 @@ The Go client for the [DecisionNode](https://decisionnode.com) API: ask structur
 - Decisions one at a time, many at once, as a live session over a WebSocket, or as a batch at half the price.
 - Up to 16 images by URL, from files or from bytes, checked locally and uploaded only when that is faster.
 - Videos sent as the frames you sampled, each with its time.
+- Boosters: specialist readings of your images (an age, whether a picture was AI-generated) added to a decision as evidence.
+- Your own fine-tuned models, called by name.
 - Typed answers and typed errors, matched with `errors.As`.
 - Retries, timeouts, connection reuse and HTTP/2 built in. One dependency, for WebSockets.
 
@@ -135,14 +137,14 @@ Numbers are passed through exactly as received: a probability list may read 0.82
 | `Supervise(ctx, body, feed, onEvent)` | Keeps a feed of frames answered across sessions, reopening as needed. |
 | `Batches()` | The Batch API: `Create`, `Add`, `Finalize`, `Get`, `List`, `Results`, `Cancel`; see [Batches](#batches). |
 | `RunBatch(ctx, requests, dn.RunBatchOptions)` | A batch from start to results in one call. |
-| `Models(ctx)` | The models your key can use, with their published limits, as `[]dn.ModelInfo`. The session, batch, number and upload limits are also typed fields (`Sessions`, `Batch`, `NumberMaxGridValues`, ...). |
+| `Models(ctx)` | The models your key can use, with their published limits, as `[]dn.ModelInfo`. The session, batch, number and upload limits are also typed fields (`Sessions`, `Batch`, `NumberMaxGridValues`, ...), and your workspace's fine-tuned models are listed beside the catalogue's (see [Fine-tuned models](#fine-tuned-models)). |
 | `DecideRaw(ctx, body)` | Sends a body exactly as given and returns the parsed response. For API fields this version does not know yet. |
 
-`Check`, `Classify`, `Score`, `Number` and `Gate` take `Images`, `Videos` and `Model` like `Decide`. `Check`, `Classify`, `Score` and `Number` promise a typed answer, so when their own answer is missing or malformed they return a `*ServerError` with the response's status, `RequestID` and `Reason`. `Decide` returns such an answer as an `*UnknownAnswer` instead.
+`Check`, `Classify`, `Score`, `Number` and `Gate` take `Images`, `Videos`, `Model` and `Boosters` like `Decide`. `Check`, `Classify`, `Score` and `Number` promise a typed answer, so when their own answer is missing or malformed they return a `*ServerError` with the response's status, `RequestID` and `Reason`. `Decide` returns such an answer as an `*UnknownAnswer` instead.
 
-A `*Decision` holds `Answers`, `Model` (the resolved version), `Usage.InputTokens` and `Usage.OutputTokens` (`*int`), `RequestID`, `LatencyMs` (`*float64`, the server's time), `Safety`, `Warnings` and `Raw` (the parsed body). For a request with videos, `Usage.VideoFrames` (`*int`) is the number of frames read and `Usage.VideoSeconds` (`*float64`) the seconds of the windows read, and `Warnings` holds the server's notes exactly as sent when it read a video at a lower rate or resolution than asked (empty, never nil, when there are none). A value the server did not send is `nil`, never 0.
+A `*Decision` holds `Answers`, `Model` (the resolved version), `Usage.InputTokens` and `Usage.OutputTokens` (`*int`), `RequestID`, `LatencyMs` (`*float64`, the server's time), `Safety`, `Warnings` and `Raw` (the parsed body). For a request with videos, `Usage.VideoFrames` (`*int`) is the number of frames read and `Usage.VideoSeconds` (`*float64`) the seconds of the windows read, and `Warnings` holds the server's notes exactly as sent when it read a video at a lower rate or resolution than asked (empty, never nil, when there are none). For a request with boosters, `Evidence` holds what each booster read, and `Usage.BoosterTokens` and `Usage.Boosters` (`*int`) the readings' tokens and the booster calls billed (see [Boosters](#boosters)). A value the server did not send is `nil`, never 0.
 
-`dn.SpecVersion` is the version of the DecisionNode SDK specification this package implements, `"1.2"`.
+`dn.SpecVersion` is the version of the DecisionNode SDK specification this package implements, `"1.3"`.
 
 The client is safe for concurrent use and reuses its connections (HTTP/2 when the server offers it, TLS sessions resumed): create one and share it. Cancel or bound any call with its context.
 
@@ -227,6 +229,67 @@ fmt.Println(d.Truth("fall").Truth, d.Number("forklifts").Number, d.Warnings)
 | `dn.Video{ID, Frames, FPS, Start, End}` | A video: its id (unique across the request's images and videos), its frames with strictly increasing times, and optionally `FPS` (the most frames a second to read, above 0 and at most 4; the server's default is 2) and the window `[Start, End)` on the frames' own times, set with `dn.Ptr(2.0)`. |
 
 `Request.Videos` holds up to 4 videos, each a `dn.Video` or a video in its JSON wire form (a `map[string]any` or a `json.RawMessage`), checked by the same rules. The helpers, `DecideMany` and batch requests take videos as `Decide` does; sessions do not. Frames always go inline: they are never uploaded or cached, and no frame is resized or re-encoded. The checks above run before anything is sent; how many frames a request may carry, their sizes and their pixels are the server's to judge. To turn a video file into frames, use the `dn` command line tool: `dn --video dock.mp4`.
+
+### Boosters
+
+A booster is a specialist model that reads the request's images before the decision. Its reading is added to what the model sees as evidence, and comes back in the response. The model still answers every question: a booster never answers one, and a request without boosters is answered exactly as before.
+
+| Booster | Reads | Each reading |
+|---|---|---|
+| `age` (`dn.BoosterAge`) | A picture of a person; the largest face is read | `*dn.AgeReading`: `Image`, `Faces`, and `AgeYears`, `Low`, `High` (the range, in years) and `Confidence`, each nil when `Faces` is 0 |
+| `ai_generated` (`dn.BoosterAIGenerated`) | Any picture | `*dn.AIGeneratedReading`: `Image`, `Generated` (the probability that an image generator made it), `Confidence`, `Method` (`inference`, read from the pixels, or `c2pa`, the file's Content Credentials say so), `TopGenerator` (`Name`, `Probability`) and `C2PASigner` (who signed the file's Content Credentials, nil when it has none) |
+
+```go
+d, err := client.Decide(ctx, dn.Request{
+	Images: []dn.Image{
+		dn.ImageURL("selfie", "https://files.example.com/signup/88/selfie.jpg"),
+		dn.ImageURL("listing", "https://files.example.com/listings/4411/photo.jpg"),
+	},
+	Boosters: []any{
+		dn.BoosterAge,
+		dn.Booster{Name: dn.BoosterAIGenerated, Images: []string{"listing"}, Require: dn.Ptr(true)},
+	},
+	Questions: dn.Questions{
+		dn.Q("adult", dn.Truth("Is the person in `selfie` an adult?")),
+		dn.Q("synthetic", dn.Truth("Is `listing` AI-generated?")),
+	},
+})
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(d.Truth("adult").Truth, d.Truth("synthetic").Truth)
+
+for _, r := range d.Evidence.Get("age").Results {
+	if a, ok := r.(*dn.AgeReading); ok && a.Faces > 0 {
+		fmt.Println(a.Image, *a.AgeYears, *a.Low, *a.High, *a.Confidence)
+	}
+}
+for _, r := range d.Evidence.Get("ai_generated").Results {
+	if g, ok := r.(*dn.AIGeneratedReading); ok {
+		fmt.Println(g.Image, g.Generated, g.Method)
+	}
+}
+fmt.Println(*d.Usage.BoosterTokens, *d.Usage.Boosters)
+```
+
+`Request.Boosters` holds up to 4 boosters, each at most once, in the order you give: a booster's name as a string, a `dn.Booster`, or a booster in its JSON wire form (a `map[string]any`). Names are plain strings, so a booster added to the API later works with this version too.
+
+| `dn.Booster` field | Sends |
+|---|---|
+| `Name` | The booster's name. |
+| `Images` | The ids of the request's images the booster reads. Nil: every image of the request. |
+| `Require` | `dn.Ptr(true)`: a booster that fails or does not answer in time fails the request with a 529 `*dn.OverloadedError` whose `ErrorType` is `booster_unavailable`, retried like any 529. Nil or `dn.Ptr(false)`: the decision runs without that reading, and its evidence says why. |
+| `Options` | The booster's settings. Neither booster has any today. |
+
+`d.Evidence` holds one `*dn.Evidence` per booster the request named, in the request's order, and `d.Evidence.Get(name)` finds one by name: `Booster` (its name), `Version` (the booster's version, such as `age-v3`), `Status` (`ok`; `timeout`, no answer in its time; `error`; `skipped`, none of the request's images is one it reads), `LatencyMs` and `Results`, one reading per image read, empty unless `Status` is `ok`. A reading of a booster this version does not know, or one with a field missing, is a `*dn.UnknownReading` whose `Raw` holds its fields; the decision does not fail. `Usage.BoosterTokens` is the readings' share of `Usage.InputTokens`, and `Usage.Boosters` the booster calls billed. Without boosters, `Evidence` and both usage fields are nil.
+
+Boosters read images in every form an image takes: URL, inline bytes and upload. Every question sees every reading. The helpers, `DecideMany` and batch lines take boosters as `Decide` does; sessions do not. The SDK checks nothing about boosters before sending: which boosters exist and which your workspace may use is the API's to answer, before any booster runs and before any charge. Every booster is on for a new workspace, and an owner or admin can turn one off in the console.
+
+A booster call costs USD 0.002: one call per booster and image read with status `ok`. A picture the same booster read for your workspace in the last hour is not billed again, a booster that timed out or failed is free, and a request the safety check refuses pays for none. The readings' tokens are input tokens at the model's price.
+
+### Fine-tuned models
+
+A model you fine-tune on your own labelled decisions, in the console, is called by its name in `Model`: `decisionnode-1.0-flash@acme/fraud` (the version deployed most recently) or `decisionnode-1.0-flash@acme/fraud:3` (one version). The name is sent as given; only your workspace's keys can call it, and a name the API does not know for your workspace is a `*dn.BadRequestError`, "Unknown model: <name>". `d.Model` carries the name pinned to the version that answered. `Models` lists your fine-tuned models beside the catalogue's, with `FineTuned` pointing to true (nil for a catalogue model), `Base` (the model it was trained from), `AdapterVersion` (its version number) and `Status`: `deployed` answers decisions, `ready` is trained and not deployed.
 
 ### Safety
 
@@ -344,15 +407,17 @@ case errors.As(err, &apiErr):
 | 401 | `*AuthenticationError` | |
 | 402 | `*InsufficientCreditError` | |
 | 403, refusal | `*RefusalError` | `Category` (`harm` or `self_harm`), `Safety` |
-| 403, any other | `*PermissionDeniedError` | |
+| 403, any other (`booster_not_enabled`, a suspended workspace) | `*PermissionDeniedError` | |
 | 404 | `*NotFoundError` | |
 | 422 | `*ValidationError` | `Entries` |
 | 429 | `*RateLimitError` | `RetryAfter` (capped at 60 s) |
 | 429, `session_limit_exceeded` | `*SessionLimitError` (also a `*RateLimitError`), never retried | `RetryAfter` |
-| 529 | `*OverloadedError` | `RetryAfter` (capped at 60 s) |
+| 529 (also `booster_unavailable`) | `*OverloadedError` | `RetryAfter` (capped at 60 s) |
 | other 5xx | `*ServerError` | |
 | any other status (405, 409, 408 after its retries, ...) | `*Error` with the status | |
 | no response | `*ConnectionError`, `*TimeoutError` | |
+
+A booster the API does not offer is a `*BadRequestError` with `ErrorType` `booster_unknown`, and a booster with no image to read (or naming an image the request does not have) `booster_input_mismatch`; a malformed `Boosters` list is `api_usage_error` with the reason in `Reason`. Every error of a request that named boosters carries `Boosters`: how each booster ended, from the `x-decisionnode-boosters` header, in the request's order (`Name`, `Status`, `LatencyMs`), so you can see which required booster failed. `dn.ParseBoosters(d.Header)` reads the same header of a decision.
 
 Only 200 to 299 is a success. Redirects are never followed, even with a client of your own from `dn.WithHTTPClient`, so the API key never goes to another URL or over plain HTTP.
 
@@ -397,7 +462,7 @@ Each attempt has 10 seconds, covering the whole attempt: connecting, sending, an
 | `dn.WithLogger(l)` | | off |
 | `dn.WithResponseHook(f)` | | off |
 
-An option wins over the environment, and the environment over the default. The base URL must be `https`; plain `http` is accepted only for `localhost`, `127.0.0.1` and `::1`, so the API key never travels unencrypted. `dn.NewClient` does not return an error: an invalid setting is returned by `client.Err()`, and by every call before anything is sent. An empty string counts as not given, for the options and for `Request.Model`. `Request.Model` overrides the client's model for one call. The models are `decisionnode-latest` and `decisionnode-flash-latest`, which move with releases, and the pinned `decisionnode-1.0` and `decisionnode-1.0-flash`.
+An option wins over the environment, and the environment over the default. The base URL must be `https`; plain `http` is accepted only for `localhost`, `127.0.0.1` and `::1`, so the API key never travels unencrypted. `dn.NewClient` does not return an error: an invalid setting is returned by `client.Err()`, and by every call before anything is sent. An empty string counts as not given, for the options and for `Request.Model`. `Request.Model` overrides the client's model for one call. The models are `decisionnode-latest` and `decisionnode-flash-latest`, which move with releases, and the pinned `decisionnode-1.0` and `decisionnode-1.0-flash`, plus your own [fine-tuned models](#fine-tuned-models).
 
 `dn.WithLogger` takes a `*slog.Logger` and logs each attempt at debug level: method, path, status, request id and timing. State, questions and keys are never logged. The SDK sends no telemetry. Besides `Authorization`, `Accept` and `Content-Type`, the only header it sends is `User-Agent: decisionnode-go/<version>`, plus any you add with `dn.WithHeaders`. An image upload to storage carries exactly the headers the API signed for it: never the key, never your own headers, and no redirect is followed.
 
@@ -409,7 +474,7 @@ An option wins over the environment, and the environment over the default. The b
 DECISIONNODE_CONFORMANCE_DIR=/path/to/decision-node-conformance go test ./...
 ```
 
-The conformance tests run every case of the DecisionNode conformance suite against its mock server, and need `python3` for that server. `DECISIONNODE_CONFORMANCE_DIR` must point at a checkout of the suite: when it is unset the conformance test fails, it is never skipped. To run only the unit tests, pass `-skip TestConformance`. This version passes conformance suite 1.10; CI checks the suite out at the commit named once, in `CONFORMANCE_REF` in `.github/workflows/ci.yml`, with every action pinned to a commit and no credentials left in the checkouts.
+The conformance tests run every case of the DecisionNode conformance suite against its mock server, and need `python3` for that server. `DECISIONNODE_CONFORMANCE_DIR` must point at a checkout of the suite: when it is unset the conformance test fails, it is never skipped. To run only the unit tests, pass `-skip TestConformance`. This version passes conformance suite 1.11; CI checks the suite out at the commit named once, in `CONFORMANCE_REF` in `.github/workflows/ci.yml`, with every action pinned to a commit and no credentials left in the checkouts.
 
 ## License
 

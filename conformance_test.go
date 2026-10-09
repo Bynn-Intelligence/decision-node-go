@@ -447,6 +447,91 @@ func normAnswer(a dn.Answer) any {
 	}
 }
 
+// normReading is a reading in the suite's form: its kind and fields, or the
+// raw fields of a generic reading.
+func normReading(r dn.Reading) any {
+	switch x := r.(type) {
+	case *dn.AgeReading:
+		return map[string]any{"kind": "age", "image": x.Image, "faces": x.Faces, "age_years": intOrNil(x.AgeYears),
+			"low": intOrNil(x.Low), "high": intOrNil(x.High), "confidence": floatOrNil(x.Confidence)}
+	case *dn.AIGeneratedReading:
+		var top any
+		if x.TopGenerator != nil {
+			top = map[string]any{"name": x.TopGenerator.Name, "probability": x.TopGenerator.Probability}
+		}
+		var signer any
+		if x.C2PASigner != nil {
+			signer = *x.C2PASigner
+		}
+		return map[string]any{"kind": "ai_generated", "image": x.Image, "generated": x.Generated, "confidence": x.Confidence,
+			"method": x.Method, "top_generator": top, "c2pa_signer": signer}
+	}
+	return map[string]any{"kind": "unknown", "raw": r.Raw()}
+}
+
+// normEvidence is a decision's evidence as the ordered pairs the
+// expectations are turned into (orderedPairs), so the order is compared too.
+func normEvidence(l dn.EvidenceList) any {
+	if l == nil {
+		return nil
+	}
+	out := []any{}
+	for _, e := range l {
+		results := []any{}
+		for _, r := range e.Results {
+			results = append(results, normReading(r))
+		}
+		out = append(out, map[string]any{"name": e.Booster, "value": map[string]any{
+			"version": nilIfEmpty(e.Version), "status": nilIfEmpty(e.Status),
+			"latency_ms": floatOrNil(e.LatencyMs), "results": results,
+		}})
+	}
+	return out
+}
+
+// normBoosters is an error's booster statuses as ordered pairs; [] when the
+// header was absent.
+func normBoosters(list []dn.BoosterStatus) any {
+	out := []any{}
+	for _, b := range list {
+		out = append(out, map[string]any{"name": b.Name, "value": map[string]any{"status": b.Status, "latency_ms": floatOrNil(b.LatencyMs)}})
+	}
+	return out
+}
+
+// orderedPairs turns the objects under the keys whose order the suite
+// compares (a decision's evidence, an error's boosters) into lists of
+// {name, value} pairs, in order, before the expectation is made plain.
+func orderedPairs(v any) any {
+	switch x := v.(type) {
+	case *object:
+		o := &object{keys: x.keys, vals: map[string]any{}}
+		for _, k := range x.keys {
+			val := x.vals[k]
+			if inner, ok := val.(*object); ok && (k == "evidence" || k == "boosters") {
+				pairs := []any{}
+				for _, name := range inner.keys {
+					pairs = append(pairs, &object{keys: []string{"name", "value"}, vals: map[string]any{"name": name, "value": orderedPairs(inner.vals[name])}})
+				}
+				o.vals[k] = pairs
+				continue
+			}
+			o.vals[k] = orderedPairs(val)
+		}
+		return o
+	case []any:
+		out := make([]any, len(x))
+		for i, e := range x {
+			out[i] = orderedPairs(e)
+		}
+		return out
+	}
+	return v
+}
+
+// expectation is an ordered expectation made plain, with orderedPairs applied.
+func expectation(v any) any { return plain(orderedPairs(v)) }
+
 func normDecision(d *dn.Decision) any {
 	var latency any
 	if d.LatencyMs != nil {
@@ -461,12 +546,15 @@ func normDecision(d *dn.Decision) any {
 		"request_id": nilIfEmpty(d.RequestID),
 		"latency_ms": latency,
 		"usage": map[string]any{
-			"input_tokens":  intOrNil(d.Usage.InputTokens),
-			"output_tokens": intOrNil(d.Usage.OutputTokens),
-			"video_frames":  intOrNil(d.Usage.VideoFrames),
-			"video_seconds": floatOrNil(d.Usage.VideoSeconds),
+			"input_tokens":   intOrNil(d.Usage.InputTokens),
+			"output_tokens":  intOrNil(d.Usage.OutputTokens),
+			"video_frames":   intOrNil(d.Usage.VideoFrames),
+			"video_seconds":  floatOrNil(d.Usage.VideoSeconds),
+			"booster_tokens": intOrNil(d.Usage.BoosterTokens),
+			"boosters":       intOrNil(d.Usage.Boosters),
 		},
 		"warnings": d.Warnings,
+		"evidence": normEvidence(d.Evidence),
 		"safety":   normSafety(d.Safety),
 		"answers":  answers,
 		"raw":      d.Raw,
@@ -539,6 +627,7 @@ func normError(err error) any {
 		"safety":      nil,
 		"entries":     nil,
 		"retry_after": nil,
+		"boosters":    normBoosters(base.Boosters),
 	}
 	if base.Status != 0 {
 		out["status"] = base.Status
@@ -737,6 +826,40 @@ func plainArg(v any, r refs) any {
 	return raw(v)
 }
 
+// decodeBoosters reads a request's boosters: {"$booster": {name, images?,
+// require?, options?}} is a dn.Booster with only the arguments present, a
+// name or any other value is passed as is.
+func decodeBoosters(v any, r refs) []any {
+	arr := listArg(v)
+	if arr == nil {
+		return nil
+	}
+	out := make([]any, 0, len(arr))
+	for _, item := range arr {
+		o, ok := item.(*object)
+		if !ok || len(o.keys) != 1 || o.keys[0] != "$booster" {
+			out = append(out, plainArg(item, r))
+			continue
+		}
+		args := o.vals["$booster"].(*object)
+		b := dn.Booster{Name: str(args.vals["name"])}
+		if v, ok := get(args, "images"); ok {
+			b.Images = []string{}
+			for _, id := range v.([]any) {
+				b.Images = append(b.Images, str(id))
+			}
+		}
+		if v, ok := get(args, "require"); ok {
+			b.Require = dn.Ptr(v.(bool))
+		}
+		if v, ok := get(args, "options"); ok {
+			b.Options, _ = plain(v).(map[string]any)
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
 func decodeQuestions(v any) dn.Questions {
 	o, _ := v.(*object)
 	qs := dn.Questions{}
@@ -824,6 +947,7 @@ func decodeRequest(root string, args *object, r refs) (dn.Request, error) {
 		Images:    images,
 		Videos:    videos,
 		Model:     str(args.vals["model"]),
+		Boosters:  decodeBoosters(args.vals["boosters"], r),
 	}, err
 }
 
@@ -1072,6 +1196,7 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 			Images:       images,
 			Videos:       videos,
 			Model:        str(args.vals["model"]),
+			Boosters:     decodeBoosters(args.vals["boosters"], r),
 		})
 	case "classify":
 		return c.Classify(ctx, dn.ClassifyRequest{
@@ -1081,6 +1206,7 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 			Images:       images,
 			Videos:       videos,
 			Model:        str(args.vals["model"]),
+			Boosters:     decodeBoosters(args.vals["boosters"], r),
 		})
 	case "score":
 		return c.Score(ctx, dn.ScoreRequest{
@@ -1090,6 +1216,7 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 			Images:       images,
 			Videos:       videos,
 			Model:        str(args.vals["model"]),
+			Boosters:     decodeBoosters(args.vals["boosters"], r),
 		})
 	case "number":
 		return c.Number(ctx, dn.NumberRequest{
@@ -1101,14 +1228,16 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 			Images:       images,
 			Videos:       videos,
 			Model:        str(args.vals["model"]),
+			Boosters:     decodeBoosters(args.vals["boosters"], r),
 		})
 	case "gate":
 		return c.Gate(ctx, dn.GateRequest{
-			Action:  argValue(args, "action"),
-			Context: argValue(args, "context"),
-			Images:  images,
-			Videos:  videos,
-			Model:   str(args.vals["model"]),
+			Action:   argValue(args, "action"),
+			Context:  argValue(args, "context"),
+			Images:   images,
+			Videos:   videos,
+			Model:    str(args.vals["model"]),
+			Boosters: decodeBoosters(args.vals["boosters"], r),
 		})
 	case "models":
 		return c.Models(ctx)
@@ -1768,7 +1897,7 @@ func runResponse(t *testing.T, root string, m *mock, c *object) error {
 	if err != nil {
 		return fmt.Errorf("the call failed: %w", err)
 	}
-	exp := plain(c.vals["expect"]).(map[string]any)
+	exp := expectation(c.vals["expect"]).(map[string]any)
 	switch {
 	case exp["decision"] != nil:
 		return match(exp["decision"], normDecision(result.(*dn.Decision)), "decision")
@@ -1776,8 +1905,23 @@ func runResponse(t *testing.T, root string, m *mock, c *object) error {
 		return match(exp["answer"], canon(normAnswer(result.(dn.Answer))), "answer")
 	case exp["models"] != nil:
 		var got []any
-		for _, mo := range result.([]dn.ModelInfo) {
-			got = append(got, map[string]any{"name": mo.Name, "description": mo.Description, "release_date": mo.ReleaseDate, "limits": mo.Limits})
+		want, _ := exp["models"].([]any)
+		for i, mo := range result.([]dn.ModelInfo) {
+			entry := map[string]any{"name": mo.Name, "description": mo.Description, "release_date": mo.ReleaseDate, "limits": mo.Limits}
+			var listed map[string]any
+			if i < len(want) {
+				listed, _ = want[i].(map[string]any)
+			}
+			var fineTuned any
+			if mo.FineTuned != nil {
+				fineTuned = *mo.FineTuned
+			}
+			for k, v := range map[string]any{"fine_tuned": fineTuned, "base": nilIfEmpty(mo.Base), "adapter_version": intOrNil(mo.AdapterVersion), "status": nilIfEmpty(mo.Status)} {
+				if _, ok := listed[k]; ok {
+					entry[k] = v
+				}
+			}
+			got = append(got, entry)
 		}
 		if g := canon(got); !same(exp["models"], g) {
 			return fmt.Errorf("models: expected %s, got %s", short(exp["models"]), short(g))
@@ -1811,7 +1955,7 @@ func runError(t *testing.T, root string, m *mock, c *object) error {
 	if err == nil {
 		return errors.New("no error was returned")
 	}
-	exp := plain(c.vals["expect"]).(map[string]any)
+	exp := expectation(c.vals["expect"]).(map[string]any)
 	if e := checkError(exp["error"].(map[string]any), err, "error"); e != nil {
 		return e
 	}
@@ -2009,7 +2153,7 @@ func runSteps(t *testing.T, root string, m *mock, sid string, client *dn.Client,
 		case step.vals["call"] != nil:
 			result, err := invoke(ctx, root, client, step.vals["call"].(*object), saved)
 			if o, ok := get(step, "outcome"); ok {
-				if e := checkOutcome(plain(o).(map[string]any), result, err, where+".outcome"); e != nil {
+				if e := checkOutcome(expectation(o).(map[string]any), result, err, where+".outcome"); e != nil {
 					return events, e
 				}
 			} else if err != nil {
@@ -2038,7 +2182,7 @@ func runSteps(t *testing.T, root string, m *mock, sid string, client *dn.Client,
 			if check, _ := step.vals["check"].(bool); check {
 				err = s.CheckFrame(f)
 				o, _ := get(step, "outcome")
-				if e := checkOutcome(plain(o).(map[string]any), nil, err, where+".outcome"); e != nil {
+				if e := checkOutcome(expectation(o).(map[string]any), nil, err, where+".outcome"); e != nil {
 					return events, e
 				}
 				continue
@@ -2050,7 +2194,7 @@ func runSteps(t *testing.T, root string, m *mock, sid string, client *dn.Client,
 				if err == nil {
 					return events, fmt.Errorf("%s: expected %v, the frame was sent", where, plain(o))
 				}
-				if e := checkOutcome(plain(o).(map[string]any), nil, err, where+".outcome"); e != nil {
+				if e := checkOutcome(expectation(o).(map[string]any), nil, err, where+".outcome"); e != nil {
 					return events, e
 				}
 			} else if err != nil {
@@ -2176,7 +2320,7 @@ func runBehaviour(t *testing.T, root string, m *mock, c *object) error {
 	if v, ok := get(c, "mock"); ok && v != nil {
 		extra["x-mock-scenario"] = "behaviour/" + str(c.vals["id"])
 	}
-	exp := plain(c.vals["expect"]).(map[string]any)
+	exp := expectation(c.vals["expect"]).(map[string]any)
 	var mu sync.Mutex
 	var waits []time.Duration
 	var more []dn.Option

@@ -282,3 +282,33 @@ func ExamplePoint() {
 	fmt.Println(p.X, p.Y, p.Present)
 	fmt.Println(b.X1, b.Y1, b.X2, b.Y2, b.Image)
 }
+
+func ExampleBooster() {
+	client := dn.NewClient()
+	d, err := client.Decide(context.Background(), dn.Request{
+		Images: []dn.Image{
+			dn.ImageURL("selfie", "https://files.example.com/signup/88/selfie.jpg"),
+			dn.ImageURL("listing", "https://files.example.com/listings/4411/photo.jpg"),
+		},
+		Boosters: []any{
+			dn.BoosterAge,
+			dn.Booster{Name: dn.BoosterAIGenerated, Images: []string{"listing"}, Require: dn.Ptr(true)},
+		},
+		Questions: dn.Questions{
+			dn.Q("adult", dn.Truth("Is the person in `selfie` an adult?")),
+			dn.Q("synthetic", dn.Truth("Is `listing` AI-generated?")),
+		},
+	})
+	var over *dn.OverloadedError
+	if errors.As(err, &over) && over.ErrorType == "booster_unavailable" {
+		log.Fatal("a required booster failed: ", over.Boosters)
+	} else if err != nil {
+		log.Fatal(err)
+	}
+	for _, r := range d.Evidence.Get("age").Results {
+		if a, ok := r.(*dn.AgeReading); ok && a.Faces > 0 {
+			fmt.Println(a.Image, *a.AgeYears, *a.Low, *a.High)
+		}
+	}
+	fmt.Println(d.Truth("adult").Truth, d.Truth("synthetic").Truth, *d.Usage.Boosters)
+}
