@@ -291,7 +291,7 @@ It is sent as `{"name": "ai_generated", "images": ["listing"], "require": true}`
 
 Boosters read images in every form an image takes: URL, inline bytes and upload. Every question sees every reading. The helpers, `DecideMany` and batch lines take boosters as `Decide` does; sessions do not. The SDK checks nothing about boosters before sending: which boosters exist and which your workspace may use is the API's to answer, before any booster runs and before any charge. Every booster is on for a new workspace, and an owner or admin can turn one off in the console.
 
-A booster call costs USD 0.002: one call per booster and image read with status `ok`. A picture the same booster read for your workspace in the last hour is not billed again, a booster that timed out or failed is free, and a request the safety check refuses pays for none. The readings' tokens are input tokens at the model's price.
+Booster calls are billed one per booster and image read with status `ok`, at the price per call on [Pricing](https://decisionnode.com/docs/pricing#boosters). A picture the same booster read for your workspace in the last hour is not billed again, a booster that timed out or failed is free, and a request the safety check refuses pays for none. The readings' tokens are input tokens at the model's price.
 
 ### Fallback
 
