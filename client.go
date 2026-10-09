@@ -419,7 +419,11 @@ func (c *Client) sendPlaced(ctx context.Context, p *prepared, path string) (*res
 		if err != nil {
 			return nil, err
 		}
-		resp, err := c.doPayload(ctx, http.MethodPost, path, p.body(pl.wires))
+		body := p.body(pl.wires)
+		if err := checkBodySize(len(body)); err != nil {
+			return nil, err
+		}
+		resp, err := c.doPayload(ctx, http.MethodPost, path, body)
 		if err != nil && resend == 0 && len(pl.placed) > 0 && staleUpload(err) {
 			c.uploads.drop(pl.placed)
 			continue

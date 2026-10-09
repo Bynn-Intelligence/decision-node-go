@@ -16,6 +16,9 @@ const (
 	// MaxImages is the most images one request (or batch line) may carry,
 	// URLs included.
 	MaxImages = 16
+	// MaxBodyBytes is the largest request body the API takes, 25 MiB. Inline
+	// images and video frames count toward it; uploads and URLs do not.
+	MaxBodyBytes = 26_214_400
 	// MaxImageBytes is the largest image, in bytes.
 	MaxImageBytes = 10 * 1024 * 1024
 	// MaxImagePixels is the largest image, in pixels, read from its header.

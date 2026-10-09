@@ -2,6 +2,7 @@ package decisionnode
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -155,6 +156,13 @@ type OverloadedError struct {
 
 func (e *OverloadedError) Unwrap() error { return e.errorBase }
 
+// RequestTooLargeError is a 413: the request body is over MaxBodyBytes. The
+// client refuses such a body itself before sending anything, with the same
+// error and no status. It is never retried.
+type RequestTooLargeError struct{ *errorBase }
+
+func (e *RequestTooLargeError) Unwrap() error { return e.errorBase }
+
 // ServerError is any other 5xx.
 type ServerError struct{ *errorBase }
 
@@ -217,6 +225,8 @@ func newError(status int, header http.Header, body []byte) error {
 		return &PermissionDeniedError{base}
 	case status == 404:
 		return &NotFoundError{base}
+	case status == 413:
+		return &RequestTooLargeError{base}
 	case status == 422:
 		return &ValidationError{errorBase: base, Entries: entries}
 	case status == 429 && base.ErrorType == "session_limit_exceeded":
@@ -280,6 +290,23 @@ func retryAfterHeader(header http.Header) (time.Duration, bool) {
 // message the API itself would answer with, but no status and no request id.
 func localBadRequest(errorType, message, reason string) error {
 	return &BadRequestError{&Error{ErrorType: errorType, Reason: reason, msg: message}}
+}
+
+// bodyTooLarge is the local form of the API's 413 for a body of n bytes.
+func bodyTooLarge(n int) error {
+	return &RequestTooLargeError{&Error{
+		ErrorType: "request_too_large_error",
+		Reason:    fmt.Sprintf("the body is %d bytes; the limit is %d", n, MaxBodyBytes),
+		msg:       "The request body is over 26,214,400 bytes (25 MiB). Send large images as uploads (POST /v1/uploads) and name them by upload_id.",
+	}}
+}
+
+// checkBodySize refuses an encoded body over MaxBodyBytes.
+func checkBodySize(n int) error {
+	if n > MaxBodyBytes {
+		return bodyTooLarge(n)
+	}
+	return nil
 }
 
 // localValidation is the local form of a 422: entries in the API's shape, the

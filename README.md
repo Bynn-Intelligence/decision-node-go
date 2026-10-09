@@ -173,7 +173,7 @@ d, err := client.Decide(ctx, dn.Request{
 
 Every image is checked before anything is sent: at most 16 a request (URLs included; a 17th is the API's `*ValidationError` with a `too_long` entry), ids present and unique, local bytes JPEG, PNG or WebP by their first bytes (and matching a given media type), at most 10 MB, at most 40 megapixels read from the image header. Any other failure is the API's own `*BadRequestError` with no status, and nothing is sent. `Upload` takes up to 16 images a call. No image is resized or re-encoded.
 
-Local images travel the faster way for their size. When a request's local images together are under `dn.DefaultInlineThreshold` (524,288 bytes; `dn.WithInlineThreshold` changes it) they go inline as base64. At or above it they are uploaded first: one `POST /v1/uploads` for all of them, then the bytes straight to storage, in parallel, then the request names them by `upload_id`. The client remembers what it uploaded, by the bytes' SHA-256, in memory, until 5 minutes before the upload expires: the same bytes in a later call, in another request of `DecideMany`, in a session frame or a batch line are named by their `upload_id` whatever their size, and are never uploaded twice at once. If the server answers that an upload the client named has expired or is gone, the client uploads it again and sends the request once more; that does not count as a retry.
+Local images travel the faster way for their size. When a request's local images together are under `dn.DefaultInlineThreshold` (524,288 bytes; `dn.WithInlineThreshold` changes it) they go inline as base64. At or above it they are uploaded first: one `POST /v1/uploads` for all of them, then the bytes straight to storage, in parallel, then the request names them by `upload_id`. The client remembers what it uploaded, by the bytes' SHA-256, in memory, until 5 minutes before the upload expires: the same bytes in a later call, in another request of `DecideMany`, in a session frame or a batch line are named by their `upload_id` whatever their size, and are never uploaded twice at once. If the server answers that an upload the client named has expired or is gone, the client uploads it again and sends the request once more; that does not count as a retry. A request body may be at most 25 MiB (`dn.MaxBodyBytes`): inline images and video frames count toward it, uploads and URLs do not. A body over it is refused before anything is sent, with a `*dn.RequestTooLargeError`.
 
 #### Referring to images and videos
 
@@ -409,6 +409,7 @@ case errors.As(err, &apiErr):
 | 403, refusal | `*RefusalError` | `Category` (`harm` or `self_harm`), `Safety` |
 | 403, any other (`booster_not_enabled`, a suspended workspace) | `*PermissionDeniedError` | |
 | 404 | `*NotFoundError` | |
+| 413 | `*RequestTooLargeError`, never retried | |
 | 422 | `*ValidationError` | `Entries` |
 | 429 | `*RateLimitError` | `RetryAfter` (capped at 60 s) |
 | 429, `session_limit_exceeded` | `*SessionLimitError` (also a `*RateLimitError`), never retried | `RetryAfter` |
@@ -437,6 +438,7 @@ The server never sees a request the client could have refused. Every fixed rule 
 | a video without an id or with an id already used by an image or a video; a video without frames; a frame time that is negative or not after the one before it; a frame that is not JPEG, PNG or WebP by its media type; `FPS` not above 0 and at most 4; `Start` or `End` negative; `End` not after `Start` | `*BadRequestError`, `api_usage_error` |
 | an `https` image URL over 2,048 characters, with user information, on a port other than 443, or naming a private address | `*BadRequestError`, `image_url_refused` |
 | a batch line without a valid or unique `CustomID`, an `Add` with no requests, a `List` page out of range | `*BadRequestError`, `api_usage_error` |
+| a request body, or a batch line, over 25 MiB (`dn.MaxBodyBytes`, 26,214,400 bytes): a long state, many video frames, inline images | `*RequestTooLargeError`, `ErrorType` `request_too_large_error` |
 
 To validate input without sending it, call the check that matches the call: `client.CheckDecide(req)`, `CheckSession(sessionRequest)`, `CheckBatchCreate(requests)`, `CheckBatchAdd(requests)` or `session.CheckFrame(frame)`. Each runs every local check the call would run, returns the same error, and sends and uploads nothing; nil means the call would send the request.
 

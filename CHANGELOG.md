@@ -16,6 +16,8 @@ Implements version 1.3 of the DecisionNode SDK surface: boosters and fine-tuned 
 - `Error.Boosters` on every error: the `x-decisionnode-boosters` header as `BoosterStatus` entries (`Name`, `Status`, `LatencyMs`) in the request's order, so a caller sees which required booster failed. `ParseBoosters` reads the same header of a decision.
 - Fine-tuned models: a fine-tuned model's name is sent as given in `Model`, and `Decision.Model` carries the version that answered. `ModelInfo` gains `FineTuned` (nil for a catalogue model), `Base`, `AdapterVersion` and `Status`; `Version` stays the pinned name.
 
+- The API's 25 MiB body limit: `MaxBodyBytes` (26,214,400 bytes) and `RequestTooLargeError`. A request body, or a batch line, over it is refused before anything is sent, and the API's 413 is the same error, never retried. Inline images and video frames count toward it; uploaded images and URLs do not, and local images at or above the inline threshold are uploaded.
+
 ### Changed
 
 - `SpecVersion` is `"1.3"`.

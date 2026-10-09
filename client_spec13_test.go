@@ -312,3 +312,48 @@ func TestSpecVersion13(t *testing.T) {
 		t.Fatal(dn.SpecVersion)
 	}
 }
+
+func TestBodyLimit(t *testing.T) {
+	srv, rec := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		respond(w, 200, `{"model":"m","answers":{"q":{"type":"truth","truth":0.5}}}`, nil)
+	})
+	c := client(t, srv.URL)
+	ctx := context.Background()
+	overhead := len(`{"model":"decisionnode-latest","state":"","questions":{"q":{"type":"truth","instructions":"?"}}}`)
+	at := strings.Repeat("x", dn.MaxBodyBytes-overhead)
+	if _, err := c.Decide(ctx, dn.Request{State: at, Questions: oneTruth()}); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(rec.bodies[0]); n != dn.MaxBodyBytes {
+		t.Fatalf("sent %d bytes", n)
+	}
+	over := at + "x"
+	check := func(err error, what string) {
+		t.Helper()
+		var big *dn.RequestTooLargeError
+		if !errors.As(err, &big) || big.Status != 0 || big.RequestID != "" || big.ErrorType != "request_too_large_error" ||
+			!strings.HasPrefix(big.Error(), "The request body is over 26,214,400 bytes (25 MiB).") {
+			t.Fatalf("%s: %v", what, err)
+		}
+	}
+	_, err := c.Decide(ctx, dn.Request{State: over, Questions: oneTruth()})
+	check(err, "decide")
+	check(c.CheckDecide(dn.Request{State: over, Questions: oneTruth()}), "check")
+	_, err = c.DecideMany(ctx, []dn.Request{{Questions: oneTruth()}, {State: over, Questions: oneTruth()}}, 2)
+	check(err, "decide many")
+	_, err = c.Batches().Create(ctx, []dn.BatchRequest{{CustomID: dn.Ptr("a"), Request: dn.Request{State: over, Questions: oneTruth()}}})
+	check(err, "batch line")
+	if rec.count() != 1 {
+		t.Fatalf("%d requests sent", rec.count())
+	}
+
+	// The API's 413 is the same error, never retried.
+	big, rec413 := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		respond(w, 413, `{"detail":{"error_type":"request_too_large_error","message":"The request body is over 26,214,400 bytes (25 MiB)."}}`, map[string]string{"x-request-id": "req_413"})
+	})
+	_, err = client(t, big.URL).Decide(ctx, dn.Request{Questions: oneTruth()})
+	var tooLarge *dn.RequestTooLargeError
+	if !errors.As(err, &tooLarge) || tooLarge.Status != 413 || tooLarge.RequestID != "req_413" || rec413.count() != 1 {
+		t.Fatalf("413: %v after %d attempts", err, rec413.count())
+	}
+}

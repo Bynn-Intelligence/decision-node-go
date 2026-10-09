@@ -125,6 +125,11 @@ func (c *Client) prepare(req Request, customID *string) (*prepared, error) {
 	head.WriteString(`,"questions":`)
 	head.Write(questions)
 	head.Write(boosters)
+	// The body without its images, before any upload: images only add to it,
+	// and the whole body is checked again once they are placed.
+	if err := checkBodySize(head.Len() + len(videosJSON) + 1); err != nil {
+		return nil, err
+	}
 	return &prepared{head: head.Bytes(), videos: videosJSON, images: req.Images}, nil
 }
 

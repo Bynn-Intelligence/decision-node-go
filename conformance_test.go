@@ -596,6 +596,8 @@ func errorClasses(err error) []string {
 		return []string{"PermissionDeniedError", "DecisionNodeError"}
 	case *dn.NotFoundError:
 		return []string{"NotFoundError", "DecisionNodeError"}
+	case *dn.RequestTooLargeError:
+		return []string{"RequestTooLargeError", "DecisionNodeError"}
 	case *dn.ValidationError:
 		return []string{"ValidationError", "DecisionNodeError"}
 	case *dn.SessionLimitError:

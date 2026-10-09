@@ -509,7 +509,11 @@ func (c *Client) batchLines(ctx context.Context, reqs []BatchRequest, allowEmpty
 		if err != nil {
 			return err
 		}
-		lines[i] = append(preps[i].body(pl.wires), '\n')
+		line := preps[i].body(pl.wires)
+		if err := checkBodySize(len(line)); err != nil {
+			return err
+		}
+		lines[i] = append(line, '\n')
 		return nil
 	}
 	if !withImages {
