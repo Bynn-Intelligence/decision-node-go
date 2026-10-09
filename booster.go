@@ -174,11 +174,16 @@ type AIGeneratedReading struct {
 	// Method is "inference" (read from the pixels), "c2pa" (the file's
 	// Content Credentials say so), or any other value exactly as sent.
 	Method string
-	// TopGenerator is the likeliest generator. Nil when the server sent none.
+	// TopGenerator is the likeliest generator. Nil unless the picture reads
+	// as likely generated, and on every "c2pa" reading.
 	TopGenerator *TopGenerator
-	// C2PASigner is who signed the file's Content Credentials. Nil when the
-	// file has none.
+	// C2PASigner is who signed the file's Content Credentials. Nil unless
+	// the file carries Content Credentials that are trusted.
 	C2PASigner *string
+	// C2PA is "untrusted" when the file carries Content Credentials that are
+	// not trusted, or any other value exactly as sent. Nil when the server
+	// sent none.
+	C2PA *string
 }
 
 // TopGenerator is the likeliest image generator of an AIGeneratedReading.
@@ -229,7 +234,8 @@ func parseEvidence(data json.RawMessage) EvidenceList {
 
 // parseReading reads one reading of a booster. A reading of a known booster
 // with a field missing or of the wrong type is an *UnknownReading, as a
-// reading of an unknown booster is: the decision does not fail.
+// reading of an unknown booster is: the decision does not fail. Fields this
+// version does not know are ignored.
 func parseReading(booster string, v any) Reading {
 	raw, _ := v.(map[string]any)
 	base := readingBase{raw: raw}
@@ -283,6 +289,12 @@ func parseReading(booster string, v any) Reading {
 			return unknown
 		}
 		r := &AIGeneratedReading{readingBase: base, Image: image, Generated: generated, Confidence: confidence, Method: method}
+		// The API always writes top_generator and c2pa_signer, null or not.
+		_, hasTop := raw["top_generator"]
+		_, hasSigner := raw["c2pa_signer"]
+		if !hasTop || !hasSigner {
+			return unknown
+		}
 		switch x := raw["top_generator"].(type) {
 		case nil:
 		case map[string]any:
@@ -299,6 +311,13 @@ func parseReading(booster string, v any) Reading {
 		case nil:
 		case string:
 			r.C2PASigner = &x
+		default:
+			return unknown
+		}
+		switch x := raw["c2pa"].(type) {
+		case nil:
+		case string:
+			r.C2PA = &x
 		default:
 			return unknown
 		}

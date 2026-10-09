@@ -10,7 +10,7 @@ permissions:
 env:
   # The conformance suite commit this package targets (suite 1.11). Moving to a
   # newer suite is a reviewed change to this one line.
-  CONFORMANCE_REF: 49c92b052242a99a858040f66b05c1dca087e339
+  CONFORMANCE_REF: 834bd4c00b42c1dc8bd9b7823090c364076a34d2
 
 jobs:
   test:

@@ -463,8 +463,12 @@ func normReading(r dn.Reading) any {
 		if x.C2PASigner != nil {
 			signer = *x.C2PASigner
 		}
+		var c2pa any
+		if x.C2PA != nil {
+			c2pa = *x.C2PA
+		}
 		return map[string]any{"kind": "ai_generated", "image": x.Image, "generated": x.Generated, "confidence": x.Confidence,
-			"method": x.Method, "top_generator": top, "c2pa_signer": signer}
+			"method": x.Method, "top_generator": top, "c2pa_signer": signer, "c2pa": c2pa}
 	}
 	return map[string]any{"kind": "unknown", "raw": r.Raw()}
 }

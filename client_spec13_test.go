@@ -16,7 +16,8 @@ const boostedBody = `{"model":"decisionnode-1.0","answers":{"q":{"type":"truth",
 	`{"image":"a1b2","age_years":27,"low":22,"high":33,"confidence":0.81,"faces":1},{"image":"c3d4","faces":0}]},` +
 	`"ai_generated":{"version":"ai_generated-v2","status":"ok","latency_ms":340,"results":[` +
 	`{"image":"c3d4","generated":0.93,"confidence":0.86,"method":"inference","top_generator":{"name":"Generator A","probability":0.71},"c2pa_signer":null},` +
-	`{"image":"e5f6","generated":0.99,"confidence":0.99,"method":"c2pa","top_generator":null,"c2pa_signer":"Example Camera Co."}]},` +
+	`{"image":"e5f6","generated":0.99,"confidence":0.99,"method":"c2pa","top_generator":null,"c2pa_signer":"Example Camera Co."},` +
+	`{"image":"g7h8","generated":0.04,"confidence":0.9,"method":"inference","top_generator":null,"c2pa_signer":null,"c2pa":"untrusted","region":{"x":4}}]},` +
 	`"faces":{"version":"faces-v1","status":"ok","latency_ms":90,"results":[{"image":"a1b2","count":1}]},` +
 	`"text":{"version":"text-v1","status":"timeout","latency_ms":800,"results":[]}},` +
 	`"usage":{"input_tokens":341,"output_tokens":0,"booster_tokens":72,"boosters":3}}`
@@ -133,6 +134,10 @@ func TestEvidenceAndBoosterUsage(t *testing.T) {
 	if c2pa.Method != "c2pa" || c2pa.TopGenerator != nil || *c2pa.C2PASigner != "Example Camera Co." {
 		t.Fatalf("c2pa reading: %+v", c2pa)
 	}
+	untrusted := gen[2].(*dn.AIGeneratedReading)
+	if *untrusted.C2PA != "untrusted" || untrusted.TopGenerator != nil || untrusted.C2PASigner != nil || inf.C2PA != nil {
+		t.Fatalf("untrusted reading: %+v", untrusted)
+	}
 	// A booster this version does not know: a generic reading.
 	if u, ok := d.Evidence.Get("faces").Results[0].(*dn.UnknownReading); !ok || u.Raw()["count"] != 1.0 {
 		t.Fatalf("unknown booster: %#v", d.Evidence.Get("faces").Results[0])
@@ -175,7 +180,11 @@ func TestMalformedReadingsAreGeneric(t *testing.T) {
 	for _, reading := range []string{
 		`{"image":"a","generated":0.9,"confidence":0.9}`,
 		`{"image":"a","generated":0.9,"confidence":0.9,"method":"inference","top_generator":{"name":"x"}}`,
-		`{"image":"a","generated":0.9,"confidence":0.9,"method":"c2pa","c2pa_signer":7}`,
+		`{"image":"a","generated":0.9,"confidence":0.9,"method":"c2pa","top_generator":null,"c2pa_signer":7}`,
+		`{"image":"a","generated":0.9,"confidence":0.9,"method":"inference","c2pa_signer":null}`,
+		`{"image":"a","generated":0.9,"confidence":0.9,"method":"inference","top_generator":null}`,
+		`{"image":"a","generated":0.9,"confidence":0.9,"method":"inference","top_generator":"x","c2pa_signer":null}`,
+		`{"image":"a","generated":0.9,"confidence":0.9,"method":"inference","top_generator":null,"c2pa_signer":null,"c2pa":true}`,
 	} {
 		body := `{"model":"m","answers":{},"evidence":{"ai_generated":{"status":"ok","results":[` + reading + `]}}}`
 		srv, _ := server(t, func(w http.ResponseWriter, r *http.Request, n int) { respond(w, 200, body, nil) })
