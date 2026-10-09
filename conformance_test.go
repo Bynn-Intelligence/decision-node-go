@@ -853,7 +853,13 @@ func decodeBoosters(v any, r refs) []any {
 			b.Require = dn.Ptr(v.(bool))
 		}
 		if v, ok := get(args, "options"); ok {
-			b.Options, _ = plain(v).(map[string]any)
+			// Each setting as plain data, a $nest marker inside it built.
+			if o, ok := v.(*object); ok {
+				b.Options = make(map[string]any, len(o.keys))
+				for _, k := range o.keys {
+					b.Options[k] = plainArg(o.vals[k], r)
+				}
+			}
 		}
 		out = append(out, b)
 	}
