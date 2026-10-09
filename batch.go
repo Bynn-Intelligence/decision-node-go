@@ -681,7 +681,13 @@ func parseBatchResult(line []byte) (BatchResult, error) {
 		r.Decision = d
 		return r, nil
 	}
-	r.Err = newError(r.Status, header, shape.Body)
+	body := []byte(shape.Body)
+	if len(body) == 0 {
+		// A line without a body is read as a JSON null: the envelope's rules,
+		// not those of a page that is not JSON.
+		body = []byte("null")
+	}
+	r.Err = newError(r.Status, header, body)
 	return r, nil
 }
 
