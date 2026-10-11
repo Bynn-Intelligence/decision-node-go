@@ -532,3 +532,21 @@ func TestUsageCost(t *testing.T) {
 		t.Fatalf("absent cost: %v %+v", err, d.Usage.Cost)
 	}
 }
+
+func TestNewBoosterOptions(t *testing.T) {
+	srv, rec := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		respond(w, 400, `{"detail":{"error_type":"booster_unknown","message":"Unknown booster: ocr"}}`, nil)
+	})
+	_, err := client(t, srv.URL).Decide(context.Background(), dn.Request{Questions: oneTruth(), Boosters: []any{
+		dn.BoosterFaceDetection,
+		dn.OCRBooster("What is the total on the receipt?"),
+		dn.WantedPersonBooster(0.9),
+	}})
+	var bad *dn.BadRequestError
+	if !errors.As(err, &bad) || bad.ErrorType != "booster_unknown" {
+		t.Fatalf("the server's answer: %v", err)
+	}
+	if got := string(rec.bodies[0]); !strings.HasSuffix(got, `,"boosters":["face_detection",{"name":"ocr","options":{"prompt":"What is the total on the receipt?"}},{"name":"wanted_person","options":{"threshold":0.9}}]}`) {
+		t.Fatalf("body: %s", got)
+	}
+}

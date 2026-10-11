@@ -17,7 +17,27 @@ const (
 	// BoosterAIGenerated reads how likely a picture was made by an image
 	// generator, and who signed its Content Credentials.
 	BoosterAIGenerated = "ai_generated"
+	// BoosterFaceDetection finds the faces in a picture.
+	BoosterFaceDetection = "face_detection"
+	// BoosterWantedPerson reads whether a face matches an entry of a
+	// wanted-persons list. It is off unless enabled for the workspace.
+	BoosterWantedPerson = "wanted_person"
+	// BoosterOCR reads the text in a picture, or answers a prompt about it.
+	BoosterOCR = "ocr"
 )
+
+// OCRBooster is the ocr booster with a prompt: what to read or answer from
+// the picture's text, at most 500 characters (the API's limit, not checked
+// here). Sent as {"name": "ocr", "options": {"prompt": ...}}.
+func OCRBooster(prompt string) Booster {
+	return Booster{Name: BoosterOCR, Options: map[string]any{"prompt": prompt}}
+}
+
+// WantedPersonBooster is the wanted_person booster with a match threshold.
+// Sent as {"name": "wanted_person", "options": {"threshold": ...}}.
+func WantedPersonBooster(threshold float64) Booster {
+	return Booster{Name: BoosterWantedPerson, Options: map[string]any{"threshold": threshold}}
+}
 
 // Booster asks a booster to read the request's images before the decision,
 // with settings. Its reading is added to what the model sees as evidence and
