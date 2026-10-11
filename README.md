@@ -238,9 +238,6 @@ A booster is a specialist model that reads the request's images before the decis
 |---|---|---|
 | `age` (`dn.BoosterAge`) | A picture of a person; the largest face is read | `*dn.AgeReading`: `Image`, `Faces`, and `AgeYears`, `Low`, `High` (the range, in years) and `Confidence`, each nil when `Faces` is 0 |
 | `ai_generated` (`dn.BoosterAIGenerated`) | Any picture | `*dn.AIGeneratedReading`: `Image`, `Generated` (the probability that an image generator made it), `Confidence`, `Method` (`inference`, read from the pixels, or `c2pa`, the file's Content Credentials say so), `TopGenerator` (`Name`, `Probability`; nil unless the picture reads as likely generated, and on every `c2pa` reading), `C2PASigner` (who signed the file's Content Credentials, nil unless they are trusted) and `C2PA` (`"untrusted"` when the file carries Content Credentials that are not trusted, else nil) |
-| `face_detection` (`dn.BoosterFaceDetection`) | Any picture | `*dn.FaceDetectionReading`: `Image`, `Faces` (how many faces it found) and `Detections`, each face's `Box` (`X1`, `Y1`, `X2`, `Y2`, in pixels, or fractions when every point and box question asks for normalized units) and `Confidence`; the list is capped at 64, so `Faces` can be larger |
-| `wanted_person` (`dn.BoosterWantedPerson`) | A picture of a person | `*dn.WantedPersonReading`: `Image`, `Faces` (how many were checked) and `Matches`, each matching face's `Box`, `Score` and `Reference`, the list entry's reference id, never a name or any personal detail. Off unless enabled for your workspace. Option `threshold`, 0 to 1: `dn.WantedPersonBooster(0.8)` |
-| `ocr` (`dn.BoosterOCR`) | Any picture | `*dn.OCRReading`: `Image`, `Text` (the text in the picture, or the answer to the prompt; `""` when it shows none) and `Truncated` (true when the reading was cut at the context limit). Option `prompt`, a task, an instruction or a JSON schema of at most 2,000 characters: `dn.OCRBooster("What is the total?")` |
 
 ```go
 d, err := client.Decide(ctx, dn.Request{
@@ -463,7 +460,7 @@ After a call to `Models`, the client also checks the limits only that list state
 
 Each attempt has 10 seconds, covering the whole attempt: connecting, sending, and reading the response to its last byte. Requests that fail with 408, 429, any 5xx, a timeout or a connection error are retried twice, waiting as long as the API asks (`retry-after-ms`, else `Retry-After` in seconds or as an HTTP date, at most 60 s) or else backing off exponentially from 0.5 s, with jitter, up to 8 s. 400, 401, 402, 403, 404 and 422 are never retried. A decision changes nothing on the server, so a retry is always safe. An image upload to storage is retried on 5xx and connection errors the same way; a storage `403` after the upload URL's 5 minutes have passed (a slow connection) is presigned again once. Batch `Create`, `Add` and `Finalize` are the exception: they are retried only on 429 and 529, which the API never applies.
 
-A decision whose boosters name `ocr` reads for longer: each attempt has 30 seconds (`dn.OCRTimeout`) unless you set a timeout with `dn.WithTimeout`, which is then used as given. It is never retried after a timeout, because the server finishes the timed-out attempt and may bill it; its other retries stay. Give such requests a timeout of at least 30 seconds.
+A request whose boosters name `ocr` has 30 seconds per attempt (`dn.OCRTimeout`) unless you set a timeout with `dn.WithTimeout`, which is then used as given. It is never retried after a timeout, because the server finishes the timed-out attempt and may bill it; its other retries stay. Give such requests a timeout of at least 30 seconds.
 
 ## Configuration
 
@@ -472,7 +469,7 @@ A decision whose boosters name `ocr` reads for longer: each attempt has 30 secon
 | `dn.WithAPIKey(key)` | `DECISIONNODE_API_KEY` | none |
 | `dn.WithBaseURL(url)` | `DECISIONNODE_BASE_URL` | `https://api.decisionnode.com` |
 | `dn.WithModel(model)` | `DECISIONNODE_MODEL` | `decisionnode-moe` |
-| `dn.WithTimeout(d)` | | 10 s per attempt (30 s for a decision naming the `ocr` booster); must be above 0 |
+| `dn.WithTimeout(d)` | | 10 s per attempt (30 s for a request naming `ocr`); must be above 0 |
 | `dn.WithMaxRetries(n)` | | 2; must be 0 or more |
 | `dn.WithHeaders(map)` | | |
 | `dn.WithInlineThreshold(n)` | | 524,288 bytes (`dn.DefaultInlineThreshold`); 0 uploads every local image |
