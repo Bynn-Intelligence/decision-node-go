@@ -577,3 +577,34 @@ func TestOCRReading(t *testing.T) {
 		}
 	}
 }
+
+func TestFaceReadings(t *testing.T) {
+	body := `{"model":"m","answers":{},"evidence":{` +
+		`"face_detection":{"status":"ok","results":[{"image":"gate","faces":70,"detections":[{"box":{"x1":0.3219,"y1":0.2611,"x2":0.3797,"y2":0.3806},"confidence":0.97}]},` +
+		`{"image":"gate","faces":1,"detections":[{"box":{"x1":1,"y1":2,"x2":3},"confidence":0.5}]},{"image":"gate","faces":1}]},` +
+		`"wanted_person":{"status":"ok","results":[{"image":"gate","faces":2,"matches":[{"box":{"x1":412,"y1":188,"x2":486,"y2":274},"score":0.93,"reference":"wl_1:entry-0192"}]},` +
+		`{"image":"gate","faces":1,"matches":[{"box":{"x1":1,"y1":2,"x2":3,"y2":4},"score":0.9,"reference":192}]}]}}}`
+	srv, _ := server(t, func(w http.ResponseWriter, r *http.Request, n int) { respond(w, 200, body, nil) })
+	d, err := client(t, srv.URL).Decide(context.Background(), dn.Request{Questions: oneTruth()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	faces := d.Evidence.Get("face_detection").Results
+	fd, ok := faces[0].(*dn.FaceDetectionReading)
+	if !ok || fd.Faces != 70 || len(fd.Detections) != 1 || fd.Detections[0].Box.X1 != 0.3219 || fd.Detections[0].Confidence != 0.97 {
+		t.Fatalf("face detection: %#v", faces[0])
+	}
+	for _, r := range faces[1:] {
+		if _, ok := r.(*dn.UnknownReading); !ok {
+			t.Fatalf("malformed: %#v", r)
+		}
+	}
+	wanted := d.Evidence.Get("wanted_person").Results
+	wp, ok := wanted[0].(*dn.WantedPersonReading)
+	if !ok || wp.Faces != 2 || len(wp.Matches) != 1 || wp.Matches[0].Reference != "wl_1:entry-0192" || wp.Matches[0].Box.Y2 != 274 {
+		t.Fatalf("wanted person: %#v", wanted[0])
+	}
+	if _, ok := wanted[1].(*dn.UnknownReading); !ok {
+		t.Fatalf("a reference that is not a string: %#v", wanted[1])
+	}
+}

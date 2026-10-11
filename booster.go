@@ -166,7 +166,8 @@ type Evidence struct {
 }
 
 // Reading is one booster's reading of one image: an *AgeReading, an
-// *AIGeneratedReading, an *OCRReading, or an *UnknownReading for a booster
+// *AIGeneratedReading, a *FaceDetectionReading, a *WantedPersonReading, an
+// *OCRReading, or an *UnknownReading for a booster
 // this version of the package does not know or a reading with a field
 // missing or of the wrong type.
 type Reading interface {
@@ -215,6 +216,53 @@ type AIGeneratedReading struct {
 	// not trusted, or any other value exactly as sent. Nil when the server
 	// sent none.
 	C2PA *string
+}
+
+// FaceBox is a face's box by its corners, exactly as sent: whole pixels of
+// the image, or fractions of its width and height when every point and box
+// question of the request asks for normalized units.
+type FaceBox struct {
+	X1, Y1, X2, Y2 float64
+}
+
+// FaceDetection is one face a face_detection reading found.
+type FaceDetection struct {
+	Box FaceBox
+	// Confidence is 0 to 1.
+	Confidence float64
+}
+
+// FaceDetectionReading is the face_detection booster's reading of one
+// picture: Faces, how many faces it found, and Detections, each face's box
+// and confidence in the order sent. The list is capped (at 64), so Faces can
+// be larger than len(Detections).
+type FaceDetectionReading struct {
+	readingBase
+	// Image is the id of the image read.
+	Image      string
+	Faces      int
+	Detections []FaceDetection
+}
+
+// WantedMatch is one face of a wanted_person reading that matches an entry
+// of the list: its box, the match score and the entry's reference id, never
+// a name or any personal detail.
+type WantedMatch struct {
+	Box FaceBox
+	// Score is 0 to 1.
+	Score     float64
+	Reference string
+}
+
+// WantedPersonReading is the wanted_person booster's reading of one picture:
+// Faces, how many faces were checked, and Matches, the faces that match an
+// entry of the list.
+type WantedPersonReading struct {
+	readingBase
+	// Image is the id of the image read.
+	Image   string
+	Faces   int
+	Matches []WantedMatch
 }
 
 // OCRReading is the ocr booster's reading of one picture: the text it shows,
@@ -369,6 +417,41 @@ func parseReading(booster string, v any) Reading {
 			return unknown
 		}
 		return r
+	case BoosterFaceDetection:
+		faces, ok := wholeNumber(raw["faces"])
+		list, isList := raw["detections"].([]any)
+		if !ok || faces < 0 || !isList {
+			return unknown
+		}
+		r := &FaceDetectionReading{readingBase: base, Image: image, Faces: faces, Detections: []FaceDetection{}}
+		for _, x := range list {
+			d, _ := x.(map[string]any)
+			box, okBox := faceBox(d["box"])
+			conf, okConf := d["confidence"].(float64)
+			if !okBox || !okConf {
+				return unknown
+			}
+			r.Detections = append(r.Detections, FaceDetection{Box: box, Confidence: conf})
+		}
+		return r
+	case BoosterWantedPerson:
+		faces, ok := wholeNumber(raw["faces"])
+		list, isList := raw["matches"].([]any)
+		if !ok || faces < 0 || !isList {
+			return unknown
+		}
+		r := &WantedPersonReading{readingBase: base, Image: image, Faces: faces, Matches: []WantedMatch{}}
+		for _, x := range list {
+			m, _ := x.(map[string]any)
+			box, okBox := faceBox(m["box"])
+			score, okScore := m["score"].(float64)
+			ref, okRef := m["reference"].(string)
+			if !okBox || !okScore || !okRef {
+				return unknown
+			}
+			r.Matches = append(r.Matches, WantedMatch{Box: box, Score: score, Reference: ref})
+		}
+		return r
 	case BoosterOCR:
 		// The API always sends both.
 		text, ok1 := raw["text"].(string)
@@ -379,6 +462,23 @@ func parseReading(booster string, v any) Reading {
 		return &OCRReading{readingBase: base, Image: image, Text: text, Truncated: truncated}
 	}
 	return unknown
+}
+
+// faceBox reads a box's four corners, each a JSON number.
+func faceBox(v any) (FaceBox, bool) {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return FaceBox{}, false
+	}
+	var corners [4]float64
+	for i, k := range []string{"x1", "y1", "x2", "y2"} {
+		f, ok := m[k].(float64)
+		if !ok {
+			return FaceBox{}, false
+		}
+		corners[i] = f
+	}
+	return FaceBox{X1: corners[0], Y1: corners[1], X2: corners[2], Y2: corners[3]}, true
 }
 
 // wholeNumber reads a JSON number that holds a whole value.

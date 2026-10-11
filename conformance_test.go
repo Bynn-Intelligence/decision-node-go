@@ -484,10 +484,26 @@ func normReading(r dn.Reading) any {
 		}
 		return map[string]any{"kind": "ai_generated", "image": x.Image, "generated": x.Generated, "confidence": x.Confidence,
 			"method": x.Method, "top_generator": top, "c2pa_signer": signer, "c2pa": c2pa}
+	case *dn.FaceDetectionReading:
+		found := []any{}
+		for _, d := range x.Detections {
+			found = append(found, map[string]any{"box": normBox(d.Box), "confidence": d.Confidence})
+		}
+		return map[string]any{"kind": "face_detection", "image": x.Image, "faces": x.Faces, "detections": found}
+	case *dn.WantedPersonReading:
+		matches := []any{}
+		for _, m := range x.Matches {
+			matches = append(matches, map[string]any{"box": normBox(m.Box), "score": m.Score, "reference": m.Reference})
+		}
+		return map[string]any{"kind": "wanted_person", "image": x.Image, "faces": x.Faces, "matches": matches}
 	case *dn.OCRReading:
 		return map[string]any{"kind": "ocr", "image": x.Image, "text": x.Text, "truncated": x.Truncated}
 	}
 	return map[string]any{"kind": "unknown", "raw": r.Raw()}
+}
+
+func normBox(b dn.FaceBox) any {
+	return map[string]any{"x1": b.X1, "y1": b.Y1, "x2": b.X2, "y2": b.Y2}
 }
 
 // normEvidence is a decision's evidence as the ordered pairs the
