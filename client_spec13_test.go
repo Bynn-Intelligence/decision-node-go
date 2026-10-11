@@ -550,3 +550,30 @@ func TestNewBoosterOptions(t *testing.T) {
 		t.Fatalf("body: %s", got)
 	}
 }
+
+func TestOCRReading(t *testing.T) {
+	body := `{"model":"m","answers":{},"evidence":{"ocr":{"version":"ocr-v1","status":"ok","latency_ms":420,"results":[` +
+		`{"image":"receipt","text":"Total 740.00 SEK","truncated":false},{"image":"blank","text":"","truncated":false},{"image":"form","text":"{}","truncated":true},` +
+		`{"image":"a","text":740,"truncated":false},{"image":"a","text":"x","truncated":"yes"},{"image":"a","text":"x"},{"image":"a","truncated":false}]}}}`
+	srv, _ := server(t, func(w http.ResponseWriter, r *http.Request, n int) { respond(w, 200, body, nil) })
+	d, err := client(t, srv.URL).Decide(context.Background(), dn.Request{Questions: oneTruth()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs := d.Evidence.Get("ocr").Results
+	read, ok := rs[0].(*dn.OCRReading)
+	if !ok || read.Image != "receipt" || read.Text != "Total 740.00 SEK" || read.Truncated {
+		t.Fatalf("reading: %#v", rs[0])
+	}
+	if blank, ok := rs[1].(*dn.OCRReading); !ok || blank.Text != "" {
+		t.Fatalf("an empty text is a reading: %#v", rs[1])
+	}
+	if cut, ok := rs[2].(*dn.OCRReading); !ok || !cut.Truncated {
+		t.Fatalf("truncated: %#v", rs[2])
+	}
+	for _, r := range rs[3:] {
+		if _, ok := r.(*dn.UnknownReading); !ok {
+			t.Fatalf("malformed: %#v", r)
+		}
+	}
+}

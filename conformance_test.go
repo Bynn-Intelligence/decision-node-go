@@ -484,6 +484,8 @@ func normReading(r dn.Reading) any {
 		}
 		return map[string]any{"kind": "ai_generated", "image": x.Image, "generated": x.Generated, "confidence": x.Confidence,
 			"method": x.Method, "top_generator": top, "c2pa_signer": signer, "c2pa": c2pa}
+	case *dn.OCRReading:
+		return map[string]any{"kind": "ocr", "image": x.Image, "text": x.Text, "truncated": x.Truncated}
 	}
 	return map[string]any{"kind": "unknown", "raw": r.Raw()}
 }

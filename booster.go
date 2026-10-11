@@ -26,9 +26,10 @@ const (
 	BoosterOCR = "ocr"
 )
 
-// OCRBooster is the ocr booster with a prompt: what to read or answer from
-// the picture's text, at most 500 characters (the API's limit, not checked
-// here). Sent as {"name": "ocr", "options": {"prompt": ...}}.
+// OCRBooster is the ocr booster with a prompt: a task, an instruction or a
+// JSON schema for what to read from the picture, at most 2,000 characters
+// (the API's limit, not checked here). Sent as {"name": "ocr", "options":
+// {"prompt": ...}}.
 func OCRBooster(prompt string) Booster {
 	return Booster{Name: BoosterOCR, Options: map[string]any{"prompt": prompt}}
 }
@@ -165,9 +166,9 @@ type Evidence struct {
 }
 
 // Reading is one booster's reading of one image: an *AgeReading, an
-// *AIGeneratedReading, or an *UnknownReading for a booster this version of
-// the package does not know or a reading with a field missing or of the
-// wrong type.
+// *AIGeneratedReading, an *OCRReading, or an *UnknownReading for a booster
+// this version of the package does not know or a reading with a field
+// missing or of the wrong type.
 type Reading interface {
 	// Raw is the reading as sent by the server.
 	Raw() map[string]any
@@ -214,6 +215,19 @@ type AIGeneratedReading struct {
 	// not trusted, or any other value exactly as sent. Nil when the server
 	// sent none.
 	C2PA *string
+}
+
+// OCRReading is the ocr booster's reading of one picture: the text it shows,
+// or the answer to the prompt, exactly as sent ("" when the picture shows no
+// text).
+type OCRReading struct {
+	readingBase
+	// Image is the id of the image read.
+	Image string
+	// Text is the text read.
+	Text string
+	// Truncated is true when the reading was cut at the context limit.
+	Truncated bool
 }
 
 // TopGenerator is the likeliest image generator of an AIGeneratedReading.
@@ -355,6 +369,14 @@ func parseReading(booster string, v any) Reading {
 			return unknown
 		}
 		return r
+	case BoosterOCR:
+		// The API always sends both.
+		text, ok1 := raw["text"].(string)
+		truncated, ok2 := raw["truncated"].(bool)
+		if !ok1 || !ok2 {
+			return unknown
+		}
+		return &OCRReading{readingBase: base, Image: image, Text: text, Truncated: truncated}
 	}
 	return unknown
 }

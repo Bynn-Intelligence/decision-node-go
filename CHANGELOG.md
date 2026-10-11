@@ -23,7 +23,7 @@ Implements version 1.3 of the DecisionNode SDK surface: boosters and fine-tuned 
 - An error whose body is not JSON (an edge's or a proxy's page, or no body) is classed by its status alone, with an empty `ErrorType`, `RequestID` and `Reason` from their headers, nothing read from the body, and the message `HTTP <status> <text>` from a fixed table (`HTTP 413 Content Too Large`), then ` (request id <id>)` when sent. A batch result line without a body is read as a JSON null: its error keeps the message "".
 - An image id over 64 characters (code points, `MaxImageIDChars`) is refused before anything is sent: "Image <n>: its id is longer than 64 characters.", after the empty-id check and before the duplicate check, on decide, the helpers, `DecideMany` (for the whole call), batch lines and `CheckDecide`; a session frame's image goes without its id and is not checked for it.
 
-- The boosters `face_detection`, `wanted_person` and `ocr`: `BoosterFaceDetection`, `BoosterWantedPerson` and `BoosterOCR`, and `OCRBooster(prompt)` and `WantedPersonBooster(threshold)` for their options. Their readings are generic readings in this version.
+- The boosters `face_detection`, `wanted_person` and `ocr`: `BoosterFaceDetection`, `BoosterWantedPerson` and `BoosterOCR`, and `OCRBooster(prompt)` and `WantedPersonBooster(threshold)` for their options. An ocr reading is an `OCRReading` (`Image`, `Text`, `Truncated`); the other two readings are generic readings in this version.
 - `Usage.Cost` (`USD`, `ModelUSD`, `BoostersUSD`, `FreeTier`): what an answer cost, exactly as the API sent it, on decisions, batch result lines and session replies; nil when absent.
 
 ### Changed

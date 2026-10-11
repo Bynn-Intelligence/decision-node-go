@@ -240,7 +240,7 @@ A booster is a specialist model that reads the request's images before the decis
 | `ai_generated` (`dn.BoosterAIGenerated`) | Any picture | `*dn.AIGeneratedReading`: `Image`, `Generated` (the probability that an image generator made it), `Confidence`, `Method` (`inference`, read from the pixels, or `c2pa`, the file's Content Credentials say so), `TopGenerator` (`Name`, `Probability`; nil unless the picture reads as likely generated, and on every `c2pa` reading), `C2PASigner` (who signed the file's Content Credentials, nil unless they are trusted) and `C2PA` (`"untrusted"` when the file carries Content Credentials that are not trusted, else nil) |
 | `face_detection` (`dn.BoosterFaceDetection`) | Any picture | The faces found, as a `*dn.UnknownReading` whose `Raw` holds the fields in this version |
 | `wanted_person` (`dn.BoosterWantedPerson`) | A picture of a person | Whether a face matches an entry of a wanted-persons list: a match score and the entry's reference id, never a name or any personal detail, as a `*dn.UnknownReading` in this version. Off unless enabled for your workspace. Option `threshold`: `dn.WantedPersonBooster(0.9)` |
-| `ocr` (`dn.BoosterOCR`) | Any picture | The text in the picture, or the answer to a prompt, as a `*dn.UnknownReading` in this version. Option `prompt`, at most 500 characters: `dn.OCRBooster("What is the total?")` |
+| `ocr` (`dn.BoosterOCR`) | Any picture | `*dn.OCRReading`: `Image`, `Text` (the text in the picture, or the answer to the prompt; `""` when it shows none) and `Truncated` (true when the reading was cut at the context limit). Option `prompt`, a task, an instruction or a JSON schema of at most 2,000 characters: `dn.OCRBooster("What is the total?")` |
 
 ```go
 d, err := client.Decide(ctx, dn.Request{
