@@ -138,6 +138,31 @@ func (l EvidenceList) Get(name string) *Evidence {
 	return nil
 }
 
+// namesBooster reports whether an encoded boosters member names the booster,
+// by its bare name or in the object form {"name": ...}.
+func namesBooster(member []byte, name string) bool {
+	if len(member) == 0 {
+		return false
+	}
+	var list []json.RawMessage
+	if json.Unmarshal(bytes.TrimPrefix(member, []byte(`,"boosters":`)), &list) != nil {
+		return false
+	}
+	for _, raw := range list {
+		var bare string
+		if json.Unmarshal(raw, &bare) == nil && bare == name {
+			return true
+		}
+		var obj struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(raw, &obj) == nil && obj.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // Evidence is what one booster read for a request.
 type Evidence struct {
 	// Booster is the booster's name.

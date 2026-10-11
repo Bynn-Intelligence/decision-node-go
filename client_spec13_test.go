@@ -608,3 +608,37 @@ func TestFaceReadings(t *testing.T) {
 		t.Fatalf("a reference that is not a string: %#v", wanted[1])
 	}
 }
+
+// A request naming ocr is never retried after a timeout; its other retries
+// stay, and a request without ocr is retried as before.
+func TestOCRNotRetriedAfterTimeout(t *testing.T) {
+	srv, rec := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		time.Sleep(300 * time.Millisecond)
+		respond(w, 200, `{"model":"m","answers":{"q":{"type":"truth","truth":0.5}}}`, nil)
+	})
+	c := client(t, srv.URL, dn.WithTimeout(100*time.Millisecond), dn.WithSleep(func(ctx context.Context, d time.Duration) error { return nil }))
+	for _, boosters := range [][]any{{"ocr"}, {dn.OCRBooster("What is the total?")}} {
+		before := rec.count()
+		_, err := c.Decide(context.Background(), dn.Request{Questions: oneTruth(), Boosters: boosters})
+		var te *dn.TimeoutError
+		if !errors.As(err, &te) || rec.count()-before != 1 {
+			t.Fatalf("ocr %v: %v after %d attempts", boosters, err, rec.count()-before)
+		}
+	}
+	before := rec.count()
+	_, err := c.Decide(context.Background(), dn.Request{Questions: oneTruth(), Boosters: []any{"age"}})
+	var te *dn.TimeoutError
+	if !errors.As(err, &te) || rec.count()-before != 3 {
+		t.Fatalf("without ocr: %v after %d attempts", err, rec.count()-before)
+	}
+	busy, recBusy := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		respond(w, 529, `{"detail":{"error_type":"overloaded_error","message":"busy"}}`, map[string]string{"retry-after-ms": "1"})
+	})
+	c = client(t, busy.URL, dn.WithSleep(func(ctx context.Context, d time.Duration) error { return nil }))
+	if _, err := c.Decide(context.Background(), dn.Request{Questions: oneTruth(), Boosters: []any{"ocr"}}); err == nil || recBusy.count() != 3 {
+		t.Fatalf("a 529 is still retried: %v after %d attempts", err, recBusy.count())
+	}
+	if dn.OCRTimeout != 30*time.Second {
+		t.Fatal(dn.OCRTimeout)
+	}
+}

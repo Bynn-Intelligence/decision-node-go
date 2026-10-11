@@ -26,6 +26,9 @@ const (
 	// DefaultTimeout is the time allowed for each attempt, from sending the
 	// request to reading the last byte of the response body.
 	DefaultTimeout = 10 * time.Second
+	// OCRTimeout replaces DefaultTimeout for a decision whose boosters name
+	// ocr, when WithTimeout was not given: the ocr booster reads for longer.
+	OCRTimeout = 30 * time.Second
 	// DefaultMaxRetries is the number of retries after the first attempt.
 	DefaultMaxRetries = 2
 	// DefaultConcurrency is the number of requests DecideMany runs at a time.
@@ -39,10 +42,13 @@ const (
 // Client calls the DecisionNode API. It is safe for concurrent use and reuses
 // its connections; create one and share it.
 type Client struct {
-	apiKey     string
-	baseURL    string
-	model      string
-	timeout    time.Duration
+	apiKey  string
+	baseURL string
+	model   string
+	timeout time.Duration
+	// timeoutSet is true when WithTimeout set the timeout, which then holds
+	// for a request naming ocr too.
+	timeoutSet bool
 	maxRetries int
 	headers    http.Header
 	httpClient *http.Client
@@ -100,6 +106,7 @@ func WithTimeout(d time.Duration) Option {
 			return
 		}
 		c.timeout = d
+		c.timeoutSet = true
 	}
 }
 
@@ -423,13 +430,28 @@ func (c *Client) sendPlaced(ctx context.Context, p *prepared, path string) (*res
 		if err := checkBodySize(len(body)); err != nil {
 			return nil, err
 		}
-		resp, err := c.doPayload(ctx, http.MethodPost, path, body)
+		resp, err := c.call(ctx, http.MethodPost, path, body, c.decisionOptions(p))
 		if err != nil && resend == 0 && len(pl.placed) > 0 && staleUpload(err) {
 			c.uploads.drop(pl.placed)
 			continue
 		}
 		return resp, err
 	}
+}
+
+// decisionOptions are the retries and timeout of one decision: a request
+// whose boosters name ocr waits OCRTimeout per attempt unless WithTimeout
+// was given, and is never retried after a timeout, since the server
+// finishes the timed-out attempt and may bill it.
+func (c *Client) decisionOptions(p *prepared) callOptions {
+	if !p.ocr {
+		return callOptions{}
+	}
+	o := callOptions{noRetryAfterTimeout: true}
+	if !c.timeoutSet {
+		o.timeout = OCRTimeout
+	}
+	return o
 }
 
 // staleUpload reports a 400 whose upload reference is no longer usable.
@@ -817,6 +839,11 @@ const (
 type callOptions struct {
 	policy      retryPolicy
 	contentType string
+	// timeout replaces the client's timeout for each attempt when not 0.
+	timeout time.Duration
+	// noRetryAfterTimeout stops the retries after an attempt that timed
+	// out: the server finishes it and may bill it.
+	noRetryAfterTimeout bool
 }
 
 // doPayload sends an encoded body (nil for none) with retries and returns the
@@ -834,12 +861,20 @@ func (c *Client) call(ctx context.Context, method, path string, payload []byte, 
 	if c.apiKey == "" {
 		return nil, &AuthenticationError{&Error{msg: "no API key: pass WithAPIKey or set DECISIONNODE_API_KEY"}}
 	}
+	timeout := c.timeout
+	if o.timeout > 0 {
+		timeout = o.timeout
+	}
 	for attempt := 0; ; attempt++ {
-		resp, header, err := c.attempt(ctx, method, path, payload, o.contentType, attempt)
+		resp, header, err := c.attempt(ctx, method, path, payload, o.contentType, attempt, timeout)
 		if err == nil {
 			return resp, nil
 		}
 		if ctx.Err() != nil || attempt >= c.maxRetries || o.policy == retryNever || !retryable(err, o.policy) {
+			return nil, err
+		}
+		var te *TimeoutError
+		if o.noRetryAfterTimeout && errors.As(err, &te) {
 			return nil, err
 		}
 		wait := backoff(attempt)
@@ -854,10 +889,10 @@ func (c *Client) call(ctx context.Context, method, path string, payload []byte, 
 	}
 }
 
-func (c *Client) attempt(ctx context.Context, method, path string, payload []byte, contentType string, attempt int) (*response, http.Header, error) {
+func (c *Client) attempt(ctx context.Context, method, path string, payload []byte, contentType string, attempt int, timeout time.Duration) (*response, http.Header, error) {
 	// One deadline for the whole attempt: connecting, sending, the response
 	// headers and every byte of the body.
-	actx, cancel := context.WithTimeout(ctx, c.timeout)
+	actx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	var reader io.Reader
@@ -891,7 +926,7 @@ func (c *Client) attempt(ctx context.Context, method, path string, payload []byt
 	elapsed := time.Since(start)
 	if err != nil {
 		c.log(ctx, method, path, 0, "", elapsed, attempt, err)
-		return nil, nil, c.transportError(ctx, actx, err)
+		return nil, nil, c.transportErrorAfter(ctx, actx, err, timeout)
 	}
 	c.log(ctx, method, path, resp.StatusCode, resp.Header.Get("x-request-id"), elapsed, attempt, nil)
 	if c.onResponse != nil {
@@ -911,11 +946,16 @@ func (c *Client) attempt(ctx context.Context, method, path string, payload []byt
 }
 
 func (c *Client) transportError(ctx, actx context.Context, err error) error {
+	return c.transportErrorAfter(ctx, actx, err, c.timeout)
+}
+
+// transportErrorAfter is transportError for an attempt allowed timeout.
+func (c *Client) transportErrorAfter(ctx, actx context.Context, err error, timeout time.Duration) error {
 	if ctx.Err() != nil {
 		return &Error{msg: "the request was canceled", Err: ctx.Err()}
 	}
 	if errors.Is(actx.Err(), context.DeadlineExceeded) || isTimeout(err) {
-		return &TimeoutError{&Error{msg: "the request timed out after " + c.timeout.String(), Err: err}}
+		return &TimeoutError{&Error{msg: "the request timed out after " + timeout.String(), Err: err}}
 	}
 	return &ConnectionError{&Error{msg: "connection error: " + err.Error(), Err: err}}
 }

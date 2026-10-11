@@ -463,6 +463,8 @@ After a call to `Models`, the client also checks the limits only that list state
 
 Each attempt has 10 seconds, covering the whole attempt: connecting, sending, and reading the response to its last byte. Requests that fail with 408, 429, any 5xx, a timeout or a connection error are retried twice, waiting as long as the API asks (`retry-after-ms`, else `Retry-After` in seconds or as an HTTP date, at most 60 s) or else backing off exponentially from 0.5 s, with jitter, up to 8 s. 400, 401, 402, 403, 404 and 422 are never retried. A decision changes nothing on the server, so a retry is always safe. An image upload to storage is retried on 5xx and connection errors the same way; a storage `403` after the upload URL's 5 minutes have passed (a slow connection) is presigned again once. Batch `Create`, `Add` and `Finalize` are the exception: they are retried only on 429 and 529, which the API never applies.
 
+A decision whose boosters name `ocr` reads for longer: each attempt has 30 seconds (`dn.OCRTimeout`) unless you set a timeout with `dn.WithTimeout`, which is then used as given. It is never retried after a timeout, because the server finishes the timed-out attempt and may bill it; its other retries stay. Give such requests a timeout of at least 30 seconds.
+
 ## Configuration
 
 | Option | Environment variable | Default |
@@ -470,7 +472,7 @@ Each attempt has 10 seconds, covering the whole attempt: connecting, sending, an
 | `dn.WithAPIKey(key)` | `DECISIONNODE_API_KEY` | none |
 | `dn.WithBaseURL(url)` | `DECISIONNODE_BASE_URL` | `https://api.decisionnode.com` |
 | `dn.WithModel(model)` | `DECISIONNODE_MODEL` | `decisionnode-moe` |
-| `dn.WithTimeout(d)` | | 10 s per attempt; must be above 0 |
+| `dn.WithTimeout(d)` | | 10 s per attempt (30 s for a decision naming the `ocr` booster); must be above 0 |
 | `dn.WithMaxRetries(n)` | | 2; must be 0 or more |
 | `dn.WithHeaders(map)` | | |
 | `dn.WithInlineThreshold(n)` | | 524,288 bytes (`dn.DefaultInlineThreshold`); 0 uploads every local image |

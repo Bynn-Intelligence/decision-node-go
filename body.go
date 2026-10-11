@@ -19,6 +19,8 @@ type prepared struct {
 	// inline: they are never uploaded or cached.
 	videos []byte
 	images []Image
+	// ocr is true when the boosters name ocr.
+	ocr bool
 }
 
 // body returns the full body with the images' wire forms.
@@ -86,6 +88,7 @@ func (c *Client) prepare(req Request, customID *string) (*prepared, error) {
 		return nil, err
 	}
 	boosters, boosterDepth, err := encodeBoosters(req.Boosters)
+	ocr := namesBooster(boosters, BoosterOCR)
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +137,7 @@ func (c *Client) prepare(req Request, customID *string) (*prepared, error) {
 	if err := checkBodySize(head.Len() + len(videosJSON) + 1 + c.imagesSize(req.Images)); err != nil {
 		return nil, err
 	}
-	return &prepared{head: head.Bytes(), videos: videosJSON, images: req.Images}, nil
+	return &prepared{head: head.Bytes(), videos: videosJSON, images: req.Images, ocr: ocr}, nil
 }
 
 func encodeError(err error) error {

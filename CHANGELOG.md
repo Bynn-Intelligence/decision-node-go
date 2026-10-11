@@ -26,6 +26,8 @@ Implements version 1.3 of the DecisionNode SDK surface: boosters and fine-tuned 
 - The boosters `face_detection`, `wanted_person` and `ocr`: `BoosterFaceDetection`, `BoosterWantedPerson` and `BoosterOCR`, and `OCRBooster(prompt)` and `WantedPersonBooster(threshold)` for their options. Their readings: `FaceDetectionReading` (`Image`, `Faces`, `Detections` of `Box` and `Confidence`), `WantedPersonReading` (`Image`, `Faces`, `Matches` of `Box`, `Score` and `Reference`) and `OCRReading` (`Image`, `Text`, `Truncated`); a box (`FaceBox`) holds its corners as sent.
 - `Usage.Cost` (`USD`, `ModelUSD`, `BoostersUSD`, `FreeTier`): what an answer cost, exactly as the API sent it, on decisions, batch result lines and session replies; nil when absent.
 
+- A decision whose boosters name `ocr` (by name or as an object) waits `OCRTimeout`, 30 s, per attempt unless `WithTimeout` was given, and is never retried after a timeout, since the server finishes that attempt and may bill it; its other retries stay. This holds for `Decide`, the helpers and each `DecideMany` request.
+
 ### Changed
 
 - The default model is `decisionnode-moe` (it was `decisionnode-latest`), the family id that always means the current release; `decisionnode-flash` is the fast one. A pinned id is `decisionnode-<family>-<version>`, read from the model list, and an answer names the pinned id that answered. The earlier ids stay accepted by the API.
