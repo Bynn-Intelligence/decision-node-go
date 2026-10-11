@@ -71,6 +71,22 @@ type Usage struct {
 	// Boosters is the number of booster calls billed: one per booster and
 	// image read with status ok. Nil for a request without boosters.
 	Boosters *int `json:"boosters"`
+	// Cost is what the answer cost, in USD, as the API sent it. Nil when
+	// the server sent none.
+	Cost *Cost `json:"cost"`
+}
+
+// Cost is what an answer cost, in USD, exactly as the API sent it: read
+// USD, never add up the parts, since the API rounds each amount on its own.
+type Cost struct {
+	// USD is the answer's whole cost.
+	USD float64 `json:"usd"`
+	// ModelUSD is the model's part: the input tokens at the model's price.
+	ModelUSD float64 `json:"model_usd"`
+	// BoostersUSD is the boosters' part: the booster calls billed.
+	BoostersUSD float64 `json:"boosters_usd"`
+	// FreeTier is true when the answer came out of the free tier.
+	FreeTier bool `json:"free_tier"`
 }
 
 // Answer is one answer of a Decision: a *TruthAnswer, a *ChoiceAnswer, a

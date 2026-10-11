@@ -551,6 +551,13 @@ func orderedPairs(v any) any {
 // expectation is an ordered expectation made plain, with orderedPairs applied.
 func expectation(v any) any { return plain(orderedPairs(v)) }
 
+func normCost(c *dn.Cost) any {
+	if c == nil {
+		return nil
+	}
+	return map[string]any{"usd": c.USD, "model_usd": c.ModelUSD, "boosters_usd": c.BoostersUSD, "free_tier": c.FreeTier}
+}
+
 func normFallback(f *dn.Fallback) any {
 	if f == nil {
 		return nil
@@ -578,6 +585,7 @@ func normDecision(d *dn.Decision) any {
 			"video_seconds":  floatOrNil(d.Usage.VideoSeconds),
 			"booster_tokens": intOrNil(d.Usage.BoosterTokens),
 			"boosters":       intOrNil(d.Usage.Boosters),
+			"cost":           normCost(d.Usage.Cost),
 		},
 		"warnings": d.Warnings,
 		"evidence": normEvidence(d.Evidence),

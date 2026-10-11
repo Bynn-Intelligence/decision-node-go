@@ -510,3 +510,25 @@ func TestImageIDOfAtMost64Characters(t *testing.T) {
 		}
 	}
 }
+
+func TestUsageCost(t *testing.T) {
+	srv, _ := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		cost := `,"cost":{"usd":0.036014322,"model_usd":0.000014322,"boosters_usd":0.036,"free_tier":false}`
+		if n == 2 {
+			cost = ""
+		}
+		respond(w, 200, `{"model":"m","answers":{"q":{"type":"truth","truth":0.5}},"usage":{"input_tokens":341,"output_tokens":0`+cost+`}}`, nil)
+	})
+	c := client(t, srv.URL)
+	d, err := c.Decide(context.Background(), dn.Request{Questions: oneTruth()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The whole cost as sent, not the sum of its parts (0.036014321999999994).
+	if cost := d.Usage.Cost; cost == nil || cost.USD != 0.036014322 || cost.ModelUSD != 0.000014322 || cost.BoostersUSD != 0.036 || cost.FreeTier {
+		t.Fatalf("cost: %+v", d.Usage.Cost)
+	}
+	if d, err = c.Decide(context.Background(), dn.Request{Questions: oneTruth()}); err != nil || d.Usage.Cost != nil {
+		t.Fatalf("absent cost: %v %+v", err, d.Usage.Cost)
+	}
+}
