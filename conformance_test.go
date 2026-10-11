@@ -306,7 +306,22 @@ func pointer(doc any, ptr string) (any, bool) {
 
 // ---------------------------------------------------------------- comparison
 
+// patternOf is the regular expression of an expected {"$pattern": regex}.
+func patternOf(v any) (string, bool) {
+	m, ok := v.(map[string]any)
+	if !ok || len(m) != 1 {
+		return "", false
+	}
+	p, ok := m["$pattern"].(string)
+	return p, ok
+}
+
 func same(a, b any) bool {
+	// An expected {"$pattern": regex} matches a string the regex finds.
+	if p, ok := patternOf(a); ok {
+		s, ok := b.(string)
+		return ok && regexp.MustCompile(p).MatchString(s)
+	}
 	switch x := a.(type) {
 	case map[string]any:
 		y, ok := b.(map[string]any)
@@ -357,7 +372,7 @@ func short(v any) string {
 func match(expected, actual any, path string) error {
 	em, eok := expected.(map[string]any)
 	am, aok := actual.(map[string]any)
-	if eok && aok {
+	if _, pattern := patternOf(expected); eok && aok && !pattern {
 		keys := make([]string, 0, len(em))
 		for k := range em {
 			keys = append(keys, k)

@@ -224,7 +224,7 @@ func TestSessionFramesAndRawJSON(t *testing.T) {
 	var srvURL string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/sessions" {
-			respond(w, 200, `{"session_id":"ses_000000000000000000000001","model":"decisionnode-1.0","stream_url":"`+
+			respond(w, 200, `{"session_id":"ses_000000000000000000000001","model":"decisionnode-moe","stream_url":"`+
 				strings.Replace(srvURL, "http", "ws", 1)+`/stream","questions":["abort"],"answers":{}}`, nil)
 			return
 		}
@@ -324,7 +324,7 @@ func TestResultsStreamLineByLine(t *testing.T) {
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		flusher := w.(http.Flusher)
 		for i := 0; i < lines; i++ {
-			fmt.Fprintf(w, `{"custom_id":"r%d","status":200,"body":{"model":"decisionnode-1.0","answers":{"q":{"type":"truth","truth":0.5}}},"headers":{"x-request-id":"req_%d"}}`+"\n", i, i)
+			fmt.Fprintf(w, `{"custom_id":"r%d","status":200,"body":{"model":"decisionnode-moe","answers":{"q":{"type":"truth","truth":0.5}}},"headers":{"x-request-id":"req_%d"}}`+"\n", i, i)
 			if i == lines/2 {
 				flusher.Flush()
 				// A pause shorter than the idle timeout does not end the read.
@@ -416,7 +416,7 @@ func TestSessionSocketUsesTheClientTransport(t *testing.T) {
 
 func TestBatchResultRawJSONIsByteIdentical(t *testing.T) {
 	lines := []string{
-		`{"custom_id":"count-1","status":200,"body":{"model":"decisionnode-1.0","answers":{"cars":{"type":"number","number":7,"expected":7.0,"confidence":0.78,"probabilities":{"8":0.098,"6":0.105,"7":0.783}}},"usage":{"input_tokens":300,"output_tokens":0}},"headers":{"x-request-id":"req_1"}}`,
+		`{"custom_id":"count-1","status":200,"body":{"model":"decisionnode-moe","answers":{"cars":{"type":"number","number":7,"expected":7.0,"confidence":0.78,"probabilities":{"8":0.098,"6":0.105,"7":0.783}}},"usage":{"input_tokens":300,"output_tokens":0}},"headers":{"x-request-id":"req_1"}}`,
 		`{"custom_id":"t2" , "status":"expired","body":null,"headers":{}}`,
 	}
 	srv, _ := server(t, func(w http.ResponseWriter, r *http.Request, n int) {

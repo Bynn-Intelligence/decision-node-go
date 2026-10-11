@@ -22,7 +22,7 @@ const (
 	// DefaultBaseURL is the hosted API.
 	DefaultBaseURL = "https://api.decisionnode.com"
 	// DefaultModel is the model used when none is set.
-	DefaultModel = "decisionnode-latest"
+	DefaultModel = "decisionnode-moe"
 	// DefaultTimeout is the time allowed for each attempt, from sending the
 	// request to reading the last byte of the response body.
 	DefaultTimeout = 10 * time.Second

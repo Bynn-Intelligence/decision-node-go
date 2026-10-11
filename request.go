@@ -26,8 +26,8 @@ type Request struct {
 	// (a map[string]any, a json.RawMessage). Every question sees every video.
 	Videos []any
 	// Model overrides the client's model for this call: a model's name, or
-	// a fine-tuned model's name (decisionnode-1.0-flash@acme/fraud, or
-	// decisionnode-1.0-flash@acme/fraud:3 for one version), sent as given.
+	// a fine-tuned model's name (decisionnode-flash@acme/fraud, or
+	// decisionnode-flash@acme/fraud:3 for one version), sent as given.
 	Model string
 	// Boosters are the boosters that read the request's images before the
 	// decision, up to 4, in this order: a booster's name (BoosterAge,
@@ -36,7 +36,7 @@ type Request struct {
 	// no boosters field.
 	Boosters []any
 	// Fallback, set with Ptr(false), asks the API not to answer a request for
-	// decisionnode-1.0 with decisionnode-1.0-flash when no worker can take it
+	// decisionnode-moe with decisionnode-flash when no worker can take it
 	// at once: the request then gets the 529 instead. Nil leaves the field
 	// out, and the API's default, true, applies.
 	Fallback *bool

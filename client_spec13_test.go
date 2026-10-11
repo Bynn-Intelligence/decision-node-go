@@ -11,7 +11,7 @@ import (
 	dn "github.com/Bynn-Intelligence/decision-node-go"
 )
 
-const boostedBody = `{"model":"decisionnode-1.0","answers":{"q":{"type":"truth","truth":0.97}},` +
+const boostedBody = `{"model":"decisionnode-moe","answers":{"q":{"type":"truth","truth":0.97}},` +
 	`"evidence":{"age":{"version":"age-v3","status":"ok","latency_ms":212,"billed_calls":2,"results":[` +
 	`{"image":"a1b2","age_years":27,"low":22,"high":33,"confidence":0.81,"faces":1},{"image":"c3d4","faces":0}]},` +
 	`"ai_generated":{"version":"ai_generated-v2","status":"ok","latency_ms":340,"results":[` +
@@ -30,7 +30,7 @@ func TestBoostersWireForm(t *testing.T) {
 	ctx := context.Background()
 	_, err := c.Decide(ctx, dn.Request{
 		Questions: oneTruth(),
-		Model:     "decisionnode-1.0-flash@acme/fraud:3",
+		Model:     "decisionnode-flash@acme/fraud:3",
 		Boosters: []any{
 			dn.BoosterAge,
 			dn.Booster{Name: dn.BoosterAIGenerated, Images: []string{"c3d4"}, Require: dn.Ptr(true)},
@@ -43,7 +43,7 @@ func TestBoostersWireForm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"model":"decisionnode-1.0-flash@acme/fraud:3","state":"","questions":{"q":{"type":"truth","instructions":"?"}},` +
+	want := `{"model":"decisionnode-flash@acme/fraud:3","state":"","questions":{"q":{"type":"truth","instructions":"?"}},` +
 		`"boosters":["age",{"name":"ai_generated","images":["c3d4"],"require":true},{"name":"objects","options":{"min":0.5}},{"name":"text"},{"name":"faces","require":false},"objects_v2"]}`
 	if got := string(rec.bodies[0]); got != want {
 		t.Fatalf("body\n got %s\nwant %s", got, want)
@@ -54,7 +54,7 @@ func TestBoostersWireForm(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	plain := `{"model":"decisionnode-latest","state":"","questions":{"q":{"type":"truth","instructions":"?"}}}`
+	plain := `{"model":"decisionnode-moe","state":"","questions":{"q":{"type":"truth","instructions":"?"}}}`
 	if string(rec.bodies[1]) != plain || string(rec.bodies[2]) != plain {
 		t.Fatalf("no boosters: %s / %s", rec.bodies[1], rec.bodies[2])
 	}
@@ -276,12 +276,12 @@ func TestFineTunedModels(t *testing.T) {
 	srv, rec := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
 		if r.URL.Path == "/v1/models" {
 			respond(w, 200, `{"models":[`+
-				`{"name":"decisionnode-1.0-flash","version":"decisionnode-1.0-flash","max_images":16},`+
-				`{"name":"decisionnode-1.0-flash@acme/fraud:3","version":"decisionnode-1.0-flash@acme/fraud:3","description":"Claims fraud","release_date":"2026-10-09","fine_tuned":true,"base":"decisionnode-1.0-flash","adapter_version":3,"status":"deployed","max_images":16},`+
-				`{"name":"decisionnode-1.0-flash@acme/fraud:4","version":"decisionnode-1.0-flash@acme/fraud:4","fine_tuned":true,"base":"decisionnode-1.0-flash","adapter_version":4,"status":"ready"}]}`, nil)
+				`{"name":"decisionnode-flash","version":"decisionnode-flash","max_images":16},`+
+				`{"name":"decisionnode-flash@acme/fraud:3","version":"decisionnode-flash@acme/fraud:3","description":"Claims fraud","release_date":"2026-10-09","fine_tuned":true,"base":"decisionnode-flash","adapter_version":3,"status":"deployed","max_images":16},`+
+				`{"name":"decisionnode-flash@acme/fraud:4","version":"decisionnode-flash@acme/fraud:4","fine_tuned":true,"base":"decisionnode-flash","adapter_version":4,"status":"ready"}]}`, nil)
 			return
 		}
-		respond(w, 200, `{"model":"decisionnode-1.0-flash@acme/fraud:3","answers":{"q":{"type":"truth","truth":0.5}}}`, nil)
+		respond(w, 200, `{"model":"decisionnode-flash@acme/fraud:3","answers":{"q":{"type":"truth","truth":0.5}}}`, nil)
 	})
 	c := client(t, srv.URL)
 	models, err := c.Models(context.Background())
@@ -292,18 +292,18 @@ func TestFineTunedModels(t *testing.T) {
 	if cat.FineTuned != nil || cat.Base != "" || cat.AdapterVersion != nil || cat.Status != "" {
 		t.Fatalf("catalogue entry: %+v", cat)
 	}
-	if !*deployed.FineTuned || deployed.Base != "decisionnode-1.0-flash" || *deployed.AdapterVersion != 3 || deployed.Status != "deployed" ||
-		deployed.Version != "decisionnode-1.0-flash@acme/fraud:3" || deployed.Description != "Claims fraud" {
+	if !*deployed.FineTuned || deployed.Base != "decisionnode-flash" || *deployed.AdapterVersion != 3 || deployed.Status != "deployed" ||
+		deployed.Version != "decisionnode-flash@acme/fraud:3" || deployed.Description != "Claims fraud" {
 		t.Fatalf("deployed entry: %+v", deployed)
 	}
 	if ready.Status != "ready" || *ready.AdapterVersion != 4 {
 		t.Fatalf("ready entry: %+v", ready)
 	}
-	d, err := c.Decide(context.Background(), dn.Request{Questions: oneTruth(), Model: "decisionnode-1.0-flash@acme/fraud"})
+	d, err := c.Decide(context.Background(), dn.Request{Questions: oneTruth(), Model: "decisionnode-flash@acme/fraud"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.Model != "decisionnode-1.0-flash@acme/fraud:3" || !strings.Contains(string(rec.bodies[1]), `"model":"decisionnode-1.0-flash@acme/fraud"`) {
+	if d.Model != "decisionnode-flash@acme/fraud:3" || !strings.Contains(string(rec.bodies[1]), `"model":"decisionnode-flash@acme/fraud"`) {
 		t.Fatalf("model: %s, sent %s", d.Model, rec.bodies[1])
 	}
 }
@@ -320,7 +320,7 @@ func TestBodyLimit(t *testing.T) {
 	})
 	c := client(t, srv.URL)
 	ctx := context.Background()
-	overhead := len(`{"model":"decisionnode-latest","state":"","questions":{"q":{"type":"truth","instructions":"?"}}}`)
+	overhead := len(`{"model":"decisionnode-moe","state":"","questions":{"q":{"type":"truth","instructions":"?"}}}`)
 	at := strings.Repeat("x", dn.MaxBodyBytes-overhead)
 	if _, err := c.Decide(ctx, dn.Request{State: at, Questions: oneTruth()}); err != nil {
 		t.Fatal(err)
@@ -406,20 +406,20 @@ func TestBodyLimitCountsImagesAsSent(t *testing.T) {
 
 func TestFallback(t *testing.T) {
 	srv, rec := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
-		h := map[string]string{"x-decisionnode-model": "decisionnode-1.0-flash"}
+		h := map[string]string{"x-decisionnode-model": "decisionnode-flash"}
 		if n == 1 {
-			h["x-decisionnode-fallback"] = "decisionnode-1.0-flash"
-			h["x-decisionnode-requested-model"] = "decisionnode-1.0"
+			h["x-decisionnode-fallback"] = "decisionnode-flash"
+			h["x-decisionnode-requested-model"] = "decisionnode-moe"
 		}
-		respond(w, 200, `{"model":"decisionnode-1.0-flash","answers":{"check":{"type":"truth","truth":0.5}}}`, h)
+		respond(w, 200, `{"model":"decisionnode-flash","answers":{"check":{"type":"truth","truth":0.5}}}`, h)
 	})
 	c := client(t, srv.URL)
 	ctx := context.Background()
-	d, err := c.Decide(ctx, dn.Request{Questions: oneTruth(), Model: "decisionnode-1.0"})
+	d, err := c.Decide(ctx, dn.Request{Questions: oneTruth(), Model: "decisionnode-moe"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.Model != "decisionnode-1.0-flash" || d.Fallback == nil || d.Fallback.ServedModel != "decisionnode-1.0-flash" || d.Fallback.RequestedModel != "decisionnode-1.0" {
+	if d.Model != "decisionnode-flash" || d.Fallback == nil || d.Fallback.ServedModel != "decisionnode-flash" || d.Fallback.RequestedModel != "decisionnode-moe" {
 		t.Fatalf("fallback answer: %+v %+v", d, d.Fallback)
 	}
 	if strings.Contains(string(rec.bodies[0]), "fallback") {

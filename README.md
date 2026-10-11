@@ -295,11 +295,11 @@ Booster calls are billed one per booster and image read with status `ok`, at the
 
 ### Fallback
 
-When no worker can take a request for `decisionnode-1.0` at once, the API answers it with `decisionnode-1.0-flash` rather than make it wait. `d.Model` is then the model that answered, and `d.Fallback` says so: `ServedModel` and `RequestedModel`, from the `x-decisionnode-fallback` and `x-decisionnode-requested-model` headers; on an ordinary answer it is nil. To have such a request wait for its own model instead, set `Fallback: dn.Ptr(false)` on the request (the helpers and batch lines take it too): it then gets the 529, an `*dn.OverloadedError` retried like any other. Left nil, nothing is sent and the API's default applies.
+When no worker can take a request for `decisionnode-moe` at once, the API answers it with `decisionnode-flash` rather than make it wait. `d.Model` is then the model that answered, and `d.Fallback` says so: `ServedModel` and `RequestedModel`, from the `x-decisionnode-fallback` and `x-decisionnode-requested-model` headers; on an ordinary answer it is nil. To have such a request wait for its own model instead, set `Fallback: dn.Ptr(false)` on the request (the helpers and batch lines take it too): it then gets the 529, an `*dn.OverloadedError` retried like any other. Left nil, nothing is sent and the API's default applies.
 
 ### Fine-tuned models
 
-A model you fine-tune on your own labelled decisions, in the console, is called by its name in `Model`: `decisionnode-1.0-flash@acme/fraud` (the version deployed most recently) or `decisionnode-1.0-flash@acme/fraud:3` (one version). The name is sent as given; only your workspace's keys can call it, and a name the API does not know for your workspace is a `*dn.BadRequestError`, "Unknown model: <name>". `d.Model` carries the name pinned to the version that answered. `Models` lists your fine-tuned models beside the catalogue's, with `FineTuned` pointing to true (nil for a catalogue model), `Base` (the model it was trained from), `AdapterVersion` (its version number) and `Status`: `deployed` answers decisions, `ready` is trained and not deployed.
+A model you fine-tune on your own labelled decisions, in the console, is called by its name in `Model`: `decisionnode-flash@acme/fraud` (the version deployed most recently) or `decisionnode-flash@acme/fraud:3` (one version). The name is sent as given; only your workspace's keys can call it, and a name the API does not know for your workspace is a `*dn.BadRequestError`, "Unknown model: <name>". `d.Model` carries the name pinned to the version that answered. `Models` lists your fine-tuned models beside the catalogue's, with `FineTuned` pointing to true (nil for a catalogue model), `Base` (the model it was trained from), `AdapterVersion` (its version number) and `Status`: `deployed` answers decisions, `ready` is trained and not deployed.
 
 ### Safety
 
@@ -466,7 +466,7 @@ Each attempt has 10 seconds, covering the whole attempt: connecting, sending, an
 |---|---|---|
 | `dn.WithAPIKey(key)` | `DECISIONNODE_API_KEY` | none |
 | `dn.WithBaseURL(url)` | `DECISIONNODE_BASE_URL` | `https://api.decisionnode.com` |
-| `dn.WithModel(model)` | `DECISIONNODE_MODEL` | `decisionnode-latest` |
+| `dn.WithModel(model)` | `DECISIONNODE_MODEL` | `decisionnode-moe` |
 | `dn.WithTimeout(d)` | | 10 s per attempt; must be above 0 |
 | `dn.WithMaxRetries(n)` | | 2; must be 0 or more |
 | `dn.WithHeaders(map)` | | |
@@ -476,7 +476,7 @@ Each attempt has 10 seconds, covering the whole attempt: connecting, sending, an
 | `dn.WithLogger(l)` | | off |
 | `dn.WithResponseHook(f)` | | off |
 
-An option wins over the environment, and the environment over the default. The base URL must be `https`; plain `http` is accepted only for `localhost`, `127.0.0.1` and `::1`, so the API key never travels unencrypted. `dn.NewClient` does not return an error: an invalid setting is returned by `client.Err()`, and by every call before anything is sent. An empty string counts as not given, for the options and for `Request.Model`. `Request.Model` overrides the client's model for one call. The models are `decisionnode-latest` and `decisionnode-flash-latest`, which move with releases, and the pinned `decisionnode-1.0` and `decisionnode-1.0-flash`, plus your own [fine-tuned models](#fine-tuned-models).
+An option wins over the environment, and the environment over the default. The base URL must be `https`; plain `http` is accepted only for `localhost`, `127.0.0.1` and `::1`, so the API key never travels unencrypted. `dn.NewClient` does not return an error: an invalid setting is returned by `client.Err()`, and by every call before anything is sent. An empty string counts as not given, for the options and for `Request.Model`. `Request.Model` overrides the client's model for one call. The models are `decisionnode-moe`, the main model, and `decisionnode-flash`, the fast one: each always means its current release. A decision's `Model` names the pinned id that answered, `decisionnode-<family>-<version>`; to pin a version, take its id from `Models` rather than writing one down. The earlier ids `decisionnode-latest`, `decisionnode-flash-latest`, `decisionnode-1.0` and `decisionnode-1.0-flash` are still accepted. Your own [fine-tuned models](#fine-tuned-models) take the family as their base: `decisionnode-moe@acme/fraud`.
 
 `dn.WithLogger` takes a `*slog.Logger` and logs each attempt at debug level: method, path, status, request id and timing. State, questions and keys are never logged. The SDK sends no telemetry. Besides `Authorization`, `Accept` and `Content-Type`, the only header it sends is `User-Agent: decisionnode-go/<version>`, plus any you add with `dn.WithHeaders`. An image upload to storage carries exactly the headers the API signed for it: never the key, never your own headers, and no redirect is followed.
 

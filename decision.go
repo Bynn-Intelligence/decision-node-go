@@ -13,7 +13,7 @@ type Decision struct {
 	Answers map[string]Answer
 	// Model is the resolved model version that answered; for a fine-tuned
 	// model, its name pinned to the version that answered
-	// (decisionnode-1.0-flash@acme/fraud:3).
+	// (decisionnode-flash@acme/fraud:3).
 	Model string
 	// Usage is the token count of the request.
 	Usage Usage
@@ -44,7 +44,7 @@ type Decision struct {
 }
 
 // Fallback is how a request was answered by another model than the one it
-// asked for: decisionnode-1.0-flash for decisionnode-1.0 when no worker could
+// asked for: decisionnode-flash for decisionnode-moe when no worker could
 // take the request at once.
 type Fallback struct {
 	// ServedModel is the model that answered, as Decision.Model.

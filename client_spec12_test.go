@@ -205,7 +205,7 @@ func TestVideosInBatchLinesAndHelpers(t *testing.T) {
 		t.Fatalf("decide body: %.300s", body)
 	}
 	helper, rec := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
-		respond(w, 200, `{"model":"decisionnode-1.0","answers":{"check":{"type":"truth","truth":0.5}}}`, nil)
+		respond(w, 200, `{"model":"decisionnode-moe","answers":{"check":{"type":"truth","truth":0.5}}}`, nil)
 	})
 	if _, err := client(t, helper.URL).Check(context.Background(), dn.CheckRequest{Instructions: "A fall?", Videos: []any{dockVideo(t)}}); err != nil {
 		t.Fatal(err)
@@ -222,7 +222,7 @@ func TestVideosInBatchLinesAndHelpers(t *testing.T) {
 
 func TestVideoUsageAndWarnings(t *testing.T) {
 	srv, _ := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
-		respond(w, 200, `{"model":"decisionnode-1.0","answers":{"q":{"type":"truth","truth":0.5}},"usage":{"input_tokens":1300,"output_tokens":0,"video_frames":20,"video_seconds":10.000000000000002},"warnings":["Video 'dock' was read at 1 frame a second."]}`, nil)
+		respond(w, 200, `{"model":"decisionnode-moe","answers":{"q":{"type":"truth","truth":0.5}},"usage":{"input_tokens":1300,"output_tokens":0,"video_frames":20,"video_seconds":10.000000000000002},"warnings":["Video 'dock' was read at 1 frame a second."]}`, nil)
 	})
 	c := client(t, srv.URL)
 	d, err := c.Decide(context.Background(), dn.Request{Questions: oneTruth()})
@@ -249,7 +249,7 @@ func b64(b []byte) string {
 
 func TestPointAndBoxWireFormsAndAnswers(t *testing.T) {
 	srv, rec := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
-		respond(w, 200, `{"model":"decisionnode-1.0","answers":{
+		respond(w, 200, `{"model":"decisionnode-moe","answers":{
 			"pick":{"type":"point","x":812,"y":455,"present":0.97,"confidence":0.91,"image":"belt","width":1920,"height":1080},
 			"damage":{"type":"box","x1":0.1563,"y1":0.1111,"x2":0.2708,"y2":0.3796,"present":0.95,"confidence":0.88,"image":"belt","width":1920,"height":1080},
 			"odd":{"type":"point","x":true,"y":455,"present":0.97,"confidence":0.91,"image":"belt","width":1920,"height":1080}}}`, nil)

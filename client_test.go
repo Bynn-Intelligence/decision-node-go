@@ -23,7 +23,7 @@ import (
 	dn "github.com/Bynn-Intelligence/decision-node-go"
 )
 
-const truthBody = `{"model":"decisionnode-1.0","answers":{"q":{"type":"truth","truth":0.94}},"usage":{"input_tokens":9,"output_tokens":0}}`
+const truthBody = `{"model":"decisionnode-moe","answers":{"q":{"type":"truth","truth":0.94}},"usage":{"input_tokens":9,"output_tokens":0}}`
 
 func clearEnv(t *testing.T) {
 	for _, v := range []string{"DECISIONNODE_API_KEY", "DECISIONNODE_BASE_URL", "DECISIONNODE_MODEL"} {
@@ -114,7 +114,7 @@ func TestBuildersWireForm(t *testing.T) {
 
 func TestDecideSendsOrderedBody(t *testing.T) {
 	srv, rec := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
-		respond(w, 200, `{"model":"decisionnode-1.0","answers":{"z":{"type":"truth","truth":0.1},"a":{"type":"choice","choice":"x","confidence":0.5,"probabilities":{"x":0.75,"y":0.25}}},"usage":{"input_tokens":3,"output_tokens":0}}`,
+		respond(w, 200, `{"model":"decisionnode-moe","answers":{"z":{"type":"truth","truth":0.1},"a":{"type":"choice","choice":"x","confidence":0.5,"probabilities":{"x":0.75,"y":0.25}}},"usage":{"input_tokens":3,"output_tokens":0}}`,
 			map[string]string{"x-request-id": "req_1", "x-decisionnode-latency-ms": "12.5", "x-decisionnode-safety": "harm=0.031, self_harm=0.004"})
 	})
 	c := client(t, srv.URL+"/")
@@ -128,7 +128,7 @@ func TestDecideSendsOrderedBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := string(rec.bodies[0])
-	want := `{"model":"decisionnode-latest","state":"","questions":{"z":{"type":"truth","instructions":"last first?"},"a":{"criteria":{"x":null,"y":null},"type":"choice"}}}`
+	want := `{"model":"decisionnode-moe","state":"","questions":{"z":{"type":"truth","instructions":"last first?"},"a":{"criteria":{"x":null,"y":null},"type":"choice"}}}`
 	if body != want {
 		t.Fatalf("body\n got %s\nwant %s", body, want)
 	}
@@ -142,7 +142,7 @@ func TestDecideSendsOrderedBody(t *testing.T) {
 	if d.Truth("a") != nil || d.Score("z") != nil || d.Answer("missing") != nil {
 		t.Fatal("typed accessors must return nil for another type")
 	}
-	if d.RequestID != "req_1" || d.LatencyMs == nil || *d.LatencyMs != 12.5 || d.Usage.InputTokens == nil || *d.Usage.InputTokens != 3 || d.Model != "decisionnode-1.0" {
+	if d.RequestID != "req_1" || d.LatencyMs == nil || *d.LatencyMs != 12.5 || d.Usage.InputTokens == nil || *d.Usage.InputTokens != 3 || d.Model != "decisionnode-moe" {
 		t.Fatalf("decision: %+v", d)
 	}
 	if d.Safety == nil || !d.Safety.Checked || d.Safety.Harm != 0.031 {
@@ -155,20 +155,20 @@ func TestEnvironmentAndPrecedence(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("DECISIONNODE_API_KEY", "dn_env")
 	t.Setenv("DECISIONNODE_BASE_URL", srv.URL)
-	t.Setenv("DECISIONNODE_MODEL", "decisionnode-flash-latest")
+	t.Setenv("DECISIONNODE_MODEL", "decisionnode-flash")
 	ctx := context.Background()
 
 	if _, err := dn.NewClient().Decide(ctx, dn.Request{Questions: oneTruth()}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := dn.NewClient(dn.WithAPIKey("dn_arg"), dn.WithModel("decisionnode-1.0")).Decide(ctx, dn.Request{Questions: oneTruth()}); err != nil {
+	if _, err := dn.NewClient(dn.WithAPIKey("dn_arg"), dn.WithModel("decisionnode-moe")).Decide(ctx, dn.Request{Questions: oneTruth()}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := dn.NewClient().Decide(ctx, dn.Request{Questions: oneTruth(), Model: "decisionnode-1.0-flash"}); err != nil {
+	if _, err := dn.NewClient().Decide(ctx, dn.Request{Questions: oneTruth(), Model: "decisionnode-flash-0.9.0"}); err != nil {
 		t.Fatal(err)
 	}
 	wantKeys := []string{"Bearer dn_env", "Bearer dn_arg", "Bearer dn_env"}
-	wantModels := []string{"decisionnode-flash-latest", "decisionnode-1.0", "decisionnode-1.0-flash"}
+	wantModels := []string{"decisionnode-flash", "decisionnode-moe", "decisionnode-flash-0.9.0"}
 	for i := range wantKeys {
 		var body map[string]any
 		_ = json.Unmarshal(rec.bodies[i], &body)
@@ -503,14 +503,14 @@ func TestHelpers(t *testing.T) {
 func TestModelsAndDecideRaw(t *testing.T) {
 	srv, rec := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
 		if r.Method == http.MethodGet {
-			respond(w, 200, `{"models":[{"name":"decisionnode-1.0","description":"d","release_date":"2026-10-01","max_images":4}]}`, nil)
+			respond(w, 200, `{"models":[{"name":"decisionnode-moe","description":"d","release_date":"2026-10-01","max_images":4}]}`, nil)
 			return
 		}
 		respond(w, 200, `{"model":"m","answers":{},"usage":{"input_tokens":1,"output_tokens":0},"new_field":[1,2.5]}`, nil)
 	})
 	c := client(t, srv.URL)
 	ms, err := c.Models(context.Background())
-	if err != nil || len(ms) != 1 || ms[0].Name != "decisionnode-1.0" || ms[0].Limits["max_images"] != float64(4) || len(ms[0].Limits) != 1 {
+	if err != nil || len(ms) != 1 || ms[0].Name != "decisionnode-moe" || ms[0].Limits["max_images"] != float64(4) || len(ms[0].Limits) != 1 {
 		t.Fatalf("models: %v %+v", err, ms)
 	}
 	if rec.heads[0].Get("Content-Type") != "" || len(rec.bodies[0]) != 0 {
@@ -750,7 +750,7 @@ func TestEmptyArgumentsFallBack(t *testing.T) {
 	if h := rec.heads[0].Get("Authorization"); h != "Bearer dn_env" {
 		t.Fatalf("authorization %q", h)
 	}
-	if !strings.Contains(string(rec.bodies[0]), `"model":"decisionnode-latest"`) {
+	if !strings.Contains(string(rec.bodies[0]), `"model":"decisionnode-moe"`) {
 		t.Fatalf("body %s", rec.bodies[0])
 	}
 }
