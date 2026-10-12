@@ -25,8 +25,9 @@ const (
 	MaxItemLabelChars = 128
 )
 
-// itemReferencePattern is the API's pattern for an item's reference.
-const itemReferencePattern = "^[A-Za-z0-9_.:-]+$"
+// itemReferencePattern is the API's pattern for an item's reference; an
+// empty reference fails it.
+const itemReferencePattern = "^[A-Za-z0-9_.:-]{1,64}$"
 
 var itemReference = regexp.MustCompile(itemReferencePattern)
 
@@ -235,10 +236,11 @@ func (s *CollectionService) Delete(ctx context.Context, collectionID string) (*D
 }
 
 // Enroll enrolls one face with POST /v1/collections/{id}/items: the largest
-// face in the image. The reference, the label and the image are checked
-// locally as the API checks them (a *ValidationError, or the image errors a
-// decision raises). An image with no face is the API's *ValidationError
-// with the entry no_face. The call carries an Idempotency-Key, as Create
+// face in the image. The reference and the label are checked locally as
+// the API checks them (a *ValidationError), and an image URL by a
+// decision's URL rules; any other fault of the picture is the API's
+// *ValidationError with the entry image_unreadable, and an image with no
+// face the one with no_face. The call carries an Idempotency-Key, as Create
 // does, so a retry never enrolls or bills the face twice.
 func (s *CollectionService) Enroll(ctx context.Context, collectionID string, e Enrollment) (*CollectionItem, error) {
 	if s.c.err != nil {
@@ -251,7 +253,7 @@ func (s *CollectionService) Enroll(ctx context.Context, collectionID string, e E
 			"input": map[string]any{"reference": e.Reference}})
 		reason = "image: Field required"
 	}
-	if en := stringEntry([]any{"body", "reference"}, e.Reference, 1, MaxItemReferenceChars, true); en != nil {
+	if en := stringEntry([]any{"body", "reference"}, e.Reference, 0, MaxItemReferenceChars, true); en != nil {
 		entries = append(entries, en)
 		if reason == "" {
 			reason = fmt.Sprintf("reference must be 1 to %d characters of A-Z, a-z, 0-9, _ . : and -", MaxItemReferenceChars)
@@ -268,9 +270,13 @@ func (s *CollectionService) Enroll(ctx context.Context, collectionID string, e E
 	if len(entries) > 0 {
 		return nil, localValidation(reason, entries...)
 	}
+	// Only a URL's rules are checked here, as a decision's; every other
+	// fault of the picture is the server's 422 image_unreadable.
 	images := []Image{e.Image}
-	if err := checkImages(images, s.c.limitsFor("")); err != nil {
-		return nil, err
+	if e.Image.url != "" {
+		if err := checkImageURL(e.Image.id, e.Image.url); err != nil {
+			return nil, err
+		}
 	}
 	path := collectionPath(collectionID) + "/items"
 	for resend := 0; ; resend++ {

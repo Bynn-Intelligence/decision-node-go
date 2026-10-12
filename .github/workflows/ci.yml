@@ -10,7 +10,7 @@ permissions:
 env:
   # The conformance suite commit this package targets (suite 1.13). Moving to a
   # newer suite is a reviewed change to this one line.
-  CONFORMANCE_REF: b30118eb3c9566bf1c08f81a4524627011230101
+  CONFORMANCE_REF: ede3f8b03d85111ca61085df5aa7a306ab5ec943
 
 jobs:
   test:
@@ -43,7 +43,6 @@ jobs:
         with:
           repository: Bynn-Intelligence/decision-node-conformance
           ref: ${{ env.CONFORMANCE_REF }}
-          token: ${{ secrets.DECISIONNODE_CONFORMANCE_TOKEN }}
           persist-credentials: false
           path: conformance
 
