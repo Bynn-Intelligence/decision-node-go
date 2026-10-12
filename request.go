@@ -248,6 +248,34 @@ func BoxWith(instructions any, image, units string) Question {
 	return Question{Type: "box", Instructions: instructions, Image: image, Units: units}
 }
 
+// Points builds a point question asked for several places: up to max spots,
+// one for each thing the instructions describe ("Each person standing on the
+// platform."), answered as a *PointsAnswer. max is a whole number from
+// MinPlaces to MaxPlaces; a max outside it is refused locally with a
+// *ValidationError, before anything is sent.
+func Points(instructions any, max int) Question {
+	return Question{Type: "point", Instructions: instructions, Max: max}
+}
+
+// PointsWith builds a point question for several places that looks in the
+// image with this id and answers in units, like PointWith.
+func PointsWith(instructions any, image, units string, max int) Question {
+	return Question{Type: "point", Instructions: instructions, Image: image, Units: units, Max: max}
+}
+
+// Boxes builds a box question asked for several places: up to max
+// rectangles, one for each thing the instructions describe ("Every car in
+// the lot."), answered as a *BoxesAnswer. max is checked as for Points.
+func Boxes(instructions any, max int) Question {
+	return Question{Type: "box", Instructions: instructions, Max: max}
+}
+
+// BoxesWith builds a box question for several places that looks in the
+// image with this id and answers in units, like BoxWith.
+func BoxesWith(instructions any, image, units string, max int) Question {
+	return Question{Type: "box", Instructions: instructions, Image: image, Units: units, Max: max}
+}
+
 // Options is an ordered set of choice options, sent in this order.
 type Options []ChoiceOption
 

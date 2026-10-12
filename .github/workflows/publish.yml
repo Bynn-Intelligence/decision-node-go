@@ -1,4 +1,4 @@
-# Runs only while the repository is public: nothing is tagged or released while it is private.
+# Runs only while the repository is public (nothing is tagged or released while it is private) and checks the published files before anything is tagged.
 #
 # Auto-release decision-node-go on every push to main. Go has no registry to
 # upload to: a module version is a git tag on a public repository. The
@@ -44,6 +44,9 @@ jobs:
       - run: go vet ./...
       # The conformance suite runs in CI, against its own checkout.
       - run: go test -skip TestConformance ./...
+      # The module zip is every file of the repository at the tag; a file
+      # that carries what a public package must not stops the release here.
+      - run: git ls-files -z | xargs -0 python3 .github/scripts/check-published.py --readme README.md
 
       - id: bump
         run: |

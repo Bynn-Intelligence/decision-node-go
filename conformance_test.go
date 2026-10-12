@@ -447,6 +447,20 @@ func normAnswer(a dn.Answer) any {
 	case *dn.BoxAnswer:
 		return map[string]any{"kind": "box", "x1": x.X1, "y1": x.Y1, "x2": x.X2, "y2": x.Y2, "present": x.Present,
 			"confidence": x.Confidence, "image": x.Image, "width": x.Width, "height": x.Height}
+	case *dn.PointsAnswer:
+		places := []any{}
+		for _, pl := range x.Points {
+			places = append(places, map[string]any{"x": pl.X, "y": pl.Y, "confidence": pl.Confidence})
+		}
+		return map[string]any{"kind": "points", "count": x.Count, "present": x.Present, "complete": x.Complete,
+			"points": places, "image": x.Image, "width": x.Width, "height": x.Height}
+	case *dn.BoxesAnswer:
+		places := []any{}
+		for _, pl := range x.Boxes {
+			places = append(places, map[string]any{"x1": pl.X1, "y1": pl.Y1, "x2": pl.X2, "y2": pl.Y2, "confidence": pl.Confidence})
+		}
+		return map[string]any{"kind": "boxes", "count": x.Count, "present": x.Present, "complete": x.Complete,
+			"boxes": places, "image": x.Image, "width": x.Width, "height": x.Height}
 	case *dn.ScoreAnswer:
 		probs := map[string]any{}
 		for k, v := range x.Probabilities {
@@ -827,13 +841,35 @@ func decodeQuestion(v any) any {
 			return dn.Score(argValue(args, "instructions"), argValue(args, "levels"))
 		case "$number":
 			return dn.NumberWith(argValue(args, "instructions"), argValue(args, "min"), argValue(args, "max"), argValue(args, "step"))
-		case "$point":
-			return dn.PointWith(argValue(args, "instructions"), str(args.vals["image"]), str(args.vals["units"]))
-		case "$box":
-			return dn.BoxWith(argValue(args, "instructions"), str(args.vals["image"]), str(args.vals["units"]))
+		case "$point", "$box":
+			return decodePlace(o.keys[0], args)
 		}
 	}
 	return raw(v)
+}
+
+// decodePlace builds a point or box question. A whole-number max goes
+// through Points or Boxes; any other max (2.5, "8", true) is set as given,
+// for the local check to refuse.
+func decodePlace(key string, args *object) dn.Question {
+	instructions, image, units := argValue(args, "instructions"), str(args.vals["image"]), str(args.vals["units"])
+	most := argValue(args, "max")
+	if n, ok := most.(json.Number); ok && !strings.ContainsAny(string(n), ".eE") {
+		if i, err := n.Int64(); err == nil {
+			if key == "$point" {
+				return dn.PointsWith(instructions, image, units, int(i))
+			}
+			return dn.BoxesWith(instructions, image, units, int(i))
+		}
+	}
+	q := dn.PointWith(instructions, image, units)
+	if key == "$box" {
+		q = dn.BoxWith(instructions, image, units)
+	}
+	if most != nil {
+		q.Max = most
+	}
+	return q
 }
 
 func decodeOptions(v any) any {

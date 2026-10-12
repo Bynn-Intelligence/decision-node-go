@@ -1,6 +1,7 @@
 package decisionnode
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -199,6 +200,73 @@ type BoxAnswer struct {
 	Height float64 `json:"height"`
 }
 
+// PointsAnswer answers a point question asked for several places (Points,
+// PointsWith): up to the question's max spots, in the response's order,
+// left to right by the centre, ties from the top. Every number is exactly as
+// sent, in the units of a PointAnswer.
+type PointsAnswer struct {
+	answerBase
+	// Count is how many points follow, 0 to the question's max.
+	Count int `json:"count"`
+	// Present is the probability that at least one such thing is in the
+	// image.
+	Present float64 `json:"present"`
+	// Complete is the probability that nothing was left out: low when the
+	// image holds more than max of them.
+	Complete float64 `json:"complete"`
+	// Points are the spots, each with its own confidence; empty when Count
+	// is 0.
+	Points []PointPlace `json:"points"`
+	// Image is the id of the image looked in; Width and Height its size in
+	// pixels.
+	Image  string  `json:"image"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
+// PointPlace is one spot of a PointsAnswer.
+type PointPlace struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+	// Confidence is the probability that this spot lies on one of the
+	// things the instructions describe.
+	Confidence float64 `json:"confidence"`
+}
+
+// BoxesAnswer answers a box question asked for several places (Boxes,
+// BoxesWith): up to the question's max rectangles, in the order and with
+// the fields of a PointsAnswer.
+type BoxesAnswer struct {
+	answerBase
+	// Count is how many boxes follow, 0 to the question's max.
+	Count int `json:"count"`
+	// Present is the probability that at least one such thing is in the
+	// image.
+	Present float64 `json:"present"`
+	// Complete is the probability that nothing was left out.
+	Complete float64 `json:"complete"`
+	// Boxes are the rectangles, each with its own confidence; empty when
+	// Count is 0.
+	Boxes []BoxPlace `json:"boxes"`
+	// Image is the id of the image looked in; Width and Height its size in
+	// pixels.
+	Image  string  `json:"image"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
+// BoxPlace is one rectangle of a BoxesAnswer: its top-left (X1, Y1) and
+// bottom-right (X2, Y2) corners.
+type BoxPlace struct {
+	X1 float64 `json:"x1"`
+	Y1 float64 `json:"y1"`
+	X2 float64 `json:"x2"`
+	Y2 float64 `json:"y2"`
+	// Confidence is the probability that this box is right, as a BoxAnswer
+	// defines it.
+	Confidence float64 `json:"confidence"`
+}
+
 // UnknownAnswer holds an answer of a type this version of the package does
 // not know. Read its fields with Raw.
 type UnknownAnswer struct {
@@ -241,6 +309,20 @@ func (d *Decision) Point(id string) *PointAnswer {
 // Box returns the answer to the given question when it is a box answer, else nil.
 func (d *Decision) Box(id string) *BoxAnswer {
 	a, _ := d.Answers[id].(*BoxAnswer)
+	return a
+}
+
+// Points returns the answer to the given question when it is a several-places
+// point answer, else nil.
+func (d *Decision) Points(id string) *PointsAnswer {
+	a, _ := d.Answers[id].(*PointsAnswer)
+	return a
+}
+
+// Boxes returns the answer to the given question when it is a several-places
+// box answer, else nil.
+func (d *Decision) Boxes(id string) *BoxesAnswer {
+	a, _ := d.Answers[id].(*BoxesAnswer)
 	return a
 }
 
@@ -403,6 +485,15 @@ func parseAnswer(data json.RawMessage) Answer {
 	typ, _ := raw["type"].(string)
 	base := answerBase{typ: typ, raw: raw}
 	unknown := &UnknownAnswer{answerBase: base}
+	// A point or box answer with a list of places is the several-places
+	// shape, told by the answer itself, so a batch line is typed the same way.
+	if typ == "point" || typ == "box" {
+		_, points := raw["points"]
+		_, boxes := raw["boxes"]
+		if points || boxes {
+			return parsePlaces(data, base)
+		}
+	}
 	switch typ {
 	case "truth":
 		a := &TruthAnswer{answerBase: base}
@@ -449,6 +540,66 @@ func parseAnswer(data json.RawMessage) Answer {
 	default:
 		return unknown
 	}
+}
+
+// parsePlaces reads a several-places answer: a *PointsAnswer for a point,
+// a *BoxesAnswer for a box. Its count must be a whole number of 0 or more,
+// present, complete, width and height numbers, image a string, and its own
+// list (points for a point, boxes for a box) objects whose every field is a
+// number; anything else is an *UnknownAnswer.
+func parsePlaces(data json.RawMessage, base answerBase) Answer {
+	unknown := &UnknownAnswer{answerBase: base}
+	list, fields := "points", []string{"x", "y", "confidence"}
+	if base.typ == "box" {
+		list, fields = "boxes", []string{"x1", "y1", "x2", "y2", "confidence"}
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var raw map[string]any
+	if dec.Decode(&raw) != nil {
+		return unknown
+	}
+	number := func(v any) bool { _, ok := v.(json.Number); return ok }
+	count, isNum := raw["count"].(json.Number)
+	n, isInt := jsonInt(json.RawMessage(count))
+	if !isNum || !isInt || n.Sign() < 0 {
+		return unknown
+	}
+	for _, k := range []string{"present", "complete", "width", "height"} {
+		if !number(raw[k]) {
+			return unknown
+		}
+	}
+	if _, ok := raw["image"].(string); !ok {
+		return unknown
+	}
+	places, ok := raw[list].([]any)
+	if !ok {
+		return unknown
+	}
+	for _, p := range places {
+		place, ok := p.(map[string]any)
+		if !ok {
+			return unknown
+		}
+		for _, f := range fields {
+			if !number(place[f]) {
+				return unknown
+			}
+		}
+	}
+	if base.typ == "box" {
+		a := &BoxesAnswer{answerBase: base}
+		if json.Unmarshal(data, a) != nil {
+			return unknown
+		}
+		return a
+	}
+	a := &PointsAnswer{answerBase: base}
+	if json.Unmarshal(data, a) != nil {
+		return unknown
+	}
+	return a
 }
 
 // hasFields reports whether every key is present and not null.

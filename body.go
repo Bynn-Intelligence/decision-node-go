@@ -101,6 +101,11 @@ func (c *Client) prepare(req Request, customID *string) (*prepared, error) {
 	if err := checkNesting(depth); err != nil {
 		return nil, err
 	}
+	// The gateway refuses several places for a model that cannot answer
+	// them before it reads anything else.
+	if err := placesNotSupported(questions, lim); err != nil {
+		return nil, err
+	}
 	// The counts are 422 entries, after the state's and the questions'.
 	qc.countEntries(req.Images, videos, lim)
 	if err := qc.err(); err != nil {

@@ -21,6 +21,10 @@ const (
 	MaxNumberGridValues = 4096
 	// maxNumberDecimals is the most decimals of a number question's min and step.
 	maxNumberDecimals = 6
+	// MinPlaces and MaxPlaces bound the max of a point or box question asked
+	// for several places.
+	MinPlaces = 2
+	MaxPlaces = 16
 )
 
 var (
@@ -237,6 +241,9 @@ func (qc *questionCheck) place(id, typ string, q members, raw []byte, loc []any)
 			qc.entry("literal_error", at("units"), "Input should be 'pixels' or 'normalized'", json.RawMessage(units),
 				map[string]any{"expected": "'pixels' or 'normalized'"}, fmt.Sprintf("question '%s': units must be pixels or normalized", id))
 		}
+	}
+	if most := q.get("max"); !isNull(most) {
+		qc.placesMax(id, most, at("max"))
 	}
 	if isNull(q.get("instructions")) {
 		name := strings.ToUpper(typ[:1]) + typ[1:]
@@ -643,12 +650,84 @@ func checkImageURL(id, raw string) error {
 	return nil
 }
 
+// placesMax checks the max of a point or box question asked for several
+// places: a whole number, then at least MinPlaces, then at most MaxPlaces.
+func (qc *questionCheck) placesMax(id string, most json.RawMessage, loc []any) {
+	n, isInt := jsonInt(most)
+	switch {
+	case !isInt:
+		qc.entry("int_type", loc, "Input should be a valid integer", most, nil,
+			fmt.Sprintf("question '%s': max must be a whole number", id))
+	case n.Cmp(big.NewInt(MinPlaces)) < 0:
+		qc.entry("greater_than_equal", loc, fmt.Sprintf("Input should be greater than or equal to %d", MinPlaces), most,
+			map[string]any{"ge": MinPlaces}, fmt.Sprintf("question '%s': max must be at least %d", id, MinPlaces))
+	case n.Cmp(big.NewInt(MaxPlaces)) > 0:
+		qc.entry("less_than_equal", loc, fmt.Sprintf("Input should be less than or equal to %d", MaxPlaces), most,
+			map[string]any{"le": MaxPlaces}, fmt.Sprintf("question '%s': max must be at most %d", id, MaxPlaces))
+	}
+}
+
+// jsonInt reads a JSON integer literal (no fraction, no exponent), of any
+// size; ok is false for any other value.
+func jsonInt(v json.RawMessage) (n *big.Int, ok bool) {
+	t := string(bytes.TrimSpace(v))
+	if t == "" || strings.ContainsAny(t, ".eE") {
+		return nil, false
+	}
+	n, ok = new(big.Int).SetString(t, 10)
+	return n, ok && t[0] != '+'
+}
+
+// placesNotSupported is the gateway's 422 for a decision whose model, as
+// the client holds it from GET /v1/models, cannot answer several places
+// (no places.max_places): one not_supported entry for each point or box
+// question with a max. Nil when the model's entry is not held, when it
+// can, or when no question asks for several places. A session's open is
+// never checked here: its point and box questions are the server's.
+func placesNotSupported(questions []byte, lim limits) error {
+	if !lim.held || lim.maxPlaces > 0 {
+		return nil
+	}
+	qs, ok := objectMembers(questions)
+	if !ok {
+		return nil
+	}
+	var entries []any
+	reason := ""
+	for _, m := range qs {
+		q, ok := objectMembers(m.value)
+		if !ok {
+			continue
+		}
+		var typ string
+		if json.Unmarshal(q.get("type"), &typ) != nil || (typ != "point" && typ != "box") || isNull(q.get("max")) {
+			continue
+		}
+		entries = append(entries, map[string]any{"type": "not_supported", "loc": []any{"body", "questions", m.name, typ, "max"},
+			"msg": "Several places are not supported by this model version", "input": json.RawMessage(q.get("max"))})
+		if reason == "" {
+			reason = fmt.Sprintf("question '%s': several places are not supported by %s", m.name, lim.model)
+		}
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	if len(entries) > 1 {
+		reason += fmt.Sprintf(" and %d more", len(entries)-1)
+	}
+	return localValidation(reason, entries...)
+}
+
 // limits are the values the client holds from GET /v1/models for one model,
 // which replace or add to the documented bounds of the local checks. The
 // zero value holds nothing, and every check then uses the documented bound or
 // is left to the server.
 type limits struct {
-	model            string
+	model string
+	// held is true when the model's entry is held; maxPlaces is its
+	// places.max_places, 0 when the entry states none.
+	held             bool
+	maxPlaces        int
 	maxChoiceOptions int
 	maxScoreLevels   int
 	maxImages        int
@@ -665,7 +744,7 @@ type limits struct {
 }
 
 func limitsOf(name string, m ModelInfo) limits {
-	l := limits{model: name}
+	l := limits{model: name, held: true}
 	num := func(key string) (int, bool) {
 		f, ok := m.Raw[key].(float64)
 		return int(f), ok
@@ -687,6 +766,7 @@ func limitsOf(name string, m ModelInfo) limits {
 		l.maxImageBytes = nested("images", "max_image_bytes")
 	}
 	l.maxVideos = nested("videos", "max_videos")
+	l.maxPlaces = nested("places", "max_places")
 	l.maxGridValues, l.gridHeld = num("number_max_grid_values")
 	if m.Sessions != nil {
 		if enabled, ok := m.Raw["sessions"].(map[string]any)["enabled"].(bool); ok {
