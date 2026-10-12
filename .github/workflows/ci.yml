@@ -61,3 +61,14 @@ jobs:
         env:
           DECISIONNODE_CONFORMANCE_DIR: ${{ github.workspace }}/conformance
         run: go test -count=1 -v -run TestConformance ./...
+
+  # What a public module must not carry: the module zip is every file of the
+  # repository at the tag, so every tracked file is checked.
+  published-files:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Check the published files
+        run: git ls-files -z | xargs -0 python3 .github/scripts/check-published.py --readme README.md
