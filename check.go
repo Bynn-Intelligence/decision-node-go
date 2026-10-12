@@ -678,56 +678,12 @@ func jsonInt(v json.RawMessage) (n *big.Int, ok bool) {
 	return n, ok && t[0] != '+'
 }
 
-// placesNotSupported is the gateway's 422 for a decision whose model, as
-// the client holds it from GET /v1/models, cannot answer several places
-// (no places.max_places): one not_supported entry for each point or box
-// question with a max. Nil when the model's entry is not held, when it
-// can, or when no question asks for several places. A session's open is
-// never checked here: its point and box questions are the server's.
-func placesNotSupported(questions []byte, lim limits) error {
-	if !lim.held || lim.maxPlaces > 0 {
-		return nil
-	}
-	qs, ok := objectMembers(questions)
-	if !ok {
-		return nil
-	}
-	var entries []any
-	reason := ""
-	for _, m := range qs {
-		q, ok := objectMembers(m.value)
-		if !ok {
-			continue
-		}
-		var typ string
-		if json.Unmarshal(q.get("type"), &typ) != nil || (typ != "point" && typ != "box") || isNull(q.get("max")) {
-			continue
-		}
-		entries = append(entries, map[string]any{"type": "not_supported", "loc": []any{"body", "questions", m.name, typ, "max"},
-			"msg": "Several places are not supported by this model version", "input": json.RawMessage(q.get("max"))})
-		if reason == "" {
-			reason = fmt.Sprintf("question '%s': several places are not supported by %s", m.name, lim.model)
-		}
-	}
-	if len(entries) == 0 {
-		return nil
-	}
-	if len(entries) > 1 {
-		reason += fmt.Sprintf(" and %d more", len(entries)-1)
-	}
-	return localValidation(reason, entries...)
-}
-
 // limits are the values the client holds from GET /v1/models for one model,
 // which replace or add to the documented bounds of the local checks. The
 // zero value holds nothing, and every check then uses the documented bound or
 // is left to the server.
 type limits struct {
-	model string
-	// held is true when the model's entry is held; maxPlaces is its
-	// places.max_places, 0 when the entry states none.
-	held             bool
-	maxPlaces        int
+	model            string
 	maxChoiceOptions int
 	maxScoreLevels   int
 	maxImages        int
@@ -744,7 +700,7 @@ type limits struct {
 }
 
 func limitsOf(name string, m ModelInfo) limits {
-	l := limits{model: name, held: true}
+	l := limits{model: name}
 	num := func(key string) (int, bool) {
 		f, ok := m.Raw[key].(float64)
 		return int(f), ok
@@ -766,7 +722,6 @@ func limitsOf(name string, m ModelInfo) limits {
 		l.maxImageBytes = nested("images", "max_image_bytes")
 	}
 	l.maxVideos = nested("videos", "max_videos")
-	l.maxPlaces = nested("places", "max_places")
 	l.maxGridValues, l.gridHeld = num("number_max_grid_values")
 	if m.Sessions != nil {
 		if enabled, ok := m.Raw["sessions"].(map[string]any)["enabled"].(bool); ok {
