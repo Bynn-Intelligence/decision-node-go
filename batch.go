@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -244,25 +243,11 @@ func (b *BatchService) List(ctx context.Context, opts BatchListOptions) (*BatchP
 	if b.c.err != nil {
 		return nil, b.c.err
 	}
-	q := url.Values{}
-	if opts.Offset != nil {
-		if *opts.Offset < 0 {
-			return nil, usageError(fmt.Sprintf("Query parameter offset must be an integer of 0 or more, got %d.", *opts.Offset))
-		}
-		q.Set("offset", strconv.Itoa(*opts.Offset))
+	query, err := pageQuery(opts.Offset, opts.Limit)
+	if err != nil {
+		return nil, err
 	}
-	if opts.Limit != nil {
-		if *opts.Limit < 1 || *opts.Limit > 100 {
-			return nil, usageError(fmt.Sprintf("Query parameter limit must be an integer from 1 to 100, got %d.", *opts.Limit))
-		}
-		q.Set("limit", strconv.Itoa(*opts.Limit))
-	}
-	path := "/v1/batches"
-	if len(q) > 0 {
-		// offset first, as the API documents it.
-		path += "?" + encodeOrdered(q, "offset", "limit")
-	}
-	resp, err := b.c.doPayload(ctx, http.MethodGet, path, nil)
+	resp, err := b.c.doPayload(ctx, http.MethodGet, "/v1/batches"+query, nil)
 	if err != nil {
 		return nil, err
 	}

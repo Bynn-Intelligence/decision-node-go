@@ -39,7 +39,7 @@ WHOLE = {
 }
 
 # Boosters the README does not list.
-README_BOOSTERS = re.compile(r"\b(face_detection|wanted_person)\b")
+README_BOOSTERS = re.compile(r"\b(face_detection|face_recognition|wanted_person)\b")
 
 WORD = re.compile(r"\w+")
 

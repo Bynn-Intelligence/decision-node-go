@@ -504,12 +504,13 @@ func normReading(r dn.Reading) any {
 			found = append(found, map[string]any{"box": normBox(d.Box), "confidence": d.Confidence})
 		}
 		return map[string]any{"kind": "face_detection", "image": x.Image, "faces": x.Faces, "detections": found}
-	case *dn.WantedPersonReading:
+	case *dn.FaceRecognitionReading:
 		matches := []any{}
 		for _, m := range x.Matches {
-			matches = append(matches, map[string]any{"box": normBox(m.Box), "score": m.Score, "reference": m.Reference})
+			matches = append(matches, map[string]any{"box": normBox(m.Box), "score": m.Score, "collection": m.Collection,
+				"reference": m.Reference, "name": nilIfEmpty(m.Name), "label": nilIfEmpty(m.Label)})
 		}
-		return map[string]any{"kind": "wanted_person", "image": x.Image, "faces": x.Faces, "matches": matches}
+		return map[string]any{"kind": "face_recognition", "image": x.Image, "faces": x.Faces, "matches": matches}
 	case *dn.OCRReading:
 		return map[string]any{"kind": "ocr", "image": x.Image, "text": x.Text, "truncated": x.Truncated}
 	}
@@ -781,6 +782,10 @@ func (r refs) resolve(path string) any {
 			} else {
 				cur = x.Raw[part]
 			}
+		case *dn.Collection:
+			cur = x.Raw[part]
+		case *dn.CollectionItem:
+			cur = x.Raw[part]
 		case []string:
 			i, _ := strconv.Atoi(part)
 			cur = x[i]
@@ -1424,6 +1429,40 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 			return c.Batches().Results(ctx, id)
 		}
 		return c.Batches().Cancel(ctx, id)
+	case "collections.create":
+		return c.Collections().Create(ctx, str(plainArg(args.vals["name"], r)), str(plainArg(args.vals["type"], r)))
+	case "collections.list":
+		return c.Collections().List(ctx)
+	case "collections.get":
+		return c.Collections().Get(ctx, str(plainArg(args.vals["collection_id"], r)))
+	case "collections.delete":
+		return c.Collections().Delete(ctx, str(plainArg(args.vals["collection_id"], r)))
+	case "collections.enroll":
+		e := dn.Enrollment{Reference: str(plainArg(args.vals["reference"], r))}
+		if v, ok := get(args, "image"); ok && v != nil {
+			img, err := decodeImage(root, v, r)
+			if err != nil {
+				return nil, err
+			}
+			e.Image = img
+		}
+		if v, ok := get(args, "label"); ok && v != nil {
+			e.Label = dn.Ptr(str(plainArg(v, r)))
+		}
+		return c.Collections().Enroll(ctx, str(plainArg(args.vals["collection_id"], r)), e)
+	case "collections.list_items":
+		var opts dn.ItemListOptions
+		if n, ok := args.vals["offset"].(json.Number); ok {
+			i, _ := n.Int64()
+			opts.Offset = dn.Ptr(int(i))
+		}
+		if n, ok := args.vals["limit"].(json.Number); ok {
+			i, _ := n.Int64()
+			opts.Limit = dn.Ptr(int(i))
+		}
+		return c.Collections().ListItems(ctx, str(plainArg(args.vals["collection_id"], r)), opts)
+	case "collections.delete_item":
+		return c.Collections().DeleteItem(ctx, str(plainArg(args.vals["collection_id"], r)), str(plainArg(args.vals["item_id"], r)))
 	case "batches.list":
 		var opts dn.BatchListOptions
 		if n, ok := args.vals["offset"].(json.Number); ok {
@@ -1889,6 +1928,96 @@ func normBatch(b *dn.Batch) any {
 	})
 }
 
+// collectionKinds are the expectations of the collections calls' results.
+var collectionKinds = []string{"collection", "collections", "item", "item_page", "deleted"}
+
+// checkCollectionResult compares a collections call's result, by its
+// fields' wire names; collections is the list, compared entry by entry.
+func checkCollectionResult(kind string, want, result any, path string) error {
+	var got any
+	switch kind {
+	case "collection":
+		c, ok := result.(*dn.Collection)
+		if !ok {
+			return fmt.Errorf("%s: expected a collection, got %T", path, result)
+		}
+		got = normCollection(c)
+	case "collections":
+		list, ok := result.([]dn.Collection)
+		if !ok {
+			return fmt.Errorf("%s: expected a list of collections, got %T", path, result)
+		}
+		wants, _ := want.([]any)
+		if len(wants) != len(list) {
+			return fmt.Errorf("%s: expected %d collections, got %d", path, len(wants), len(list))
+		}
+		for i := range list {
+			if err := match(wants[i], normCollection(&list[i]), fmt.Sprintf("%s[%d]", path, i)); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "item":
+		it, ok := result.(*dn.CollectionItem)
+		if !ok {
+			return fmt.Errorf("%s: expected an item, got %T", path, result)
+		}
+		got = normItem(it)
+	case "item_page":
+		p, ok := result.(*dn.CollectionItemPage)
+		if !ok {
+			return fmt.Errorf("%s: expected a page of items, got %T", path, result)
+		}
+		items := []any{}
+		for i := range p.Items {
+			items = append(items, normItem(&p.Items[i]))
+		}
+		var next any
+		if p.NextOffset != nil {
+			next = *p.NextOffset
+		}
+		got = canon(map[string]any{"items": items, "offset": p.Offset, "limit": p.Limit, "total": p.Total, "next_offset": next})
+	case "deleted":
+		d, ok := result.(*dn.Deleted)
+		if !ok {
+			return fmt.Errorf("%s: expected a delete, got %T", path, result)
+		}
+		got = canon(map[string]any{"id": d.ID, "deleted": d.Deleted})
+	}
+	w, _ := want.(map[string]any)
+	return match(orEmpty(w), got, path)
+}
+
+func normCollection(c *dn.Collection) any {
+	var deletion any
+	if c.Deletion != nil {
+		deletion = map[string]any{"at": c.Deletion.At, "reason": c.Deletion.Reason}
+	}
+	return canon(map[string]any{"id": c.ID, "type": c.Type, "name": c.Name, "public": c.Public, "items": c.Items,
+		"created_at": nilIfEmpty(c.CreatedAt), "deletion": deletion})
+}
+
+func normItem(it *dn.CollectionItem) any {
+	m := map[string]any{"id": it.ID, "reference": it.Reference, "label": nilIfEmpty(it.Label), "created_at": nilIfEmpty(it.CreatedAt)}
+	if it.Collection != "" {
+		m["collection"] = it.Collection
+	}
+	if _, ok := it.Raw["faces_found"]; ok {
+		m["faces_found"] = it.FacesFound
+	}
+	if it.Box != nil {
+		m["box"] = normBox(*it.Box)
+	}
+	if it.Usage != nil {
+		u := map[string]any{"enrollments": intOrNil(it.Usage.Enrollments)}
+		if it.Usage.Cost != nil {
+			u["cost"] = map[string]any{"usd": it.Usage.Cost.USD}
+		}
+		m["usage"] = u
+	}
+	return canon(m)
+}
+
 func normBatchPage(p *dn.BatchPage) any {
 	batches := []any{}
 	for i := range p.Batches {
@@ -2045,6 +2174,12 @@ func runResponse(t *testing.T, root string, m *mock, c *object) error {
 		return match(exp["batch"], normBatch(result.(*dn.Batch)), "batch")
 	case exp["batch_page"] != nil:
 		return match(exp["batch_page"], normBatchPage(result.(*dn.BatchPage)), "batch_page")
+	case exp["collection"] != nil, exp["collections"] != nil, exp["item"] != nil, exp["item_page"] != nil, exp["deleted"] != nil:
+		for _, kind := range collectionKinds {
+			if want, ok := exp[kind]; ok {
+				return checkCollectionResult(kind, want, result, kind)
+			}
+		}
 	case exp["batch_results"] != nil:
 		return checkBatchResults(exp["batch_results"].([]any), result.([]dn.BatchResult), "batch_results")
 	case exp["session"] != nil:
@@ -2135,6 +2270,8 @@ func checkOutcome(spec map[string]any, result any, err error, path string) error
 			return fmt.Errorf("%s: expected batch results, got %T", path, result)
 		}
 		return checkResultsSpec(spec, rs, path)
+	case "collection", "collections", "item", "item_page", "deleted":
+		return checkCollectionResult(kind, spec[kind], result, path+"."+kind)
 	case "checked":
 		if result != nil {
 			return fmt.Errorf("%s: a check returned %v", path, result)

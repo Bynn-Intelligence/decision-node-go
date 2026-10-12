@@ -19,9 +19,9 @@ const (
 	BoosterAIGenerated = "ai_generated"
 	// BoosterFaceDetection finds the faces in a picture.
 	BoosterFaceDetection = "face_detection"
-	// BoosterWantedPerson reads whether a face matches an entry of a
-	// wanted-persons list. It is off unless enabled for the workspace.
-	BoosterWantedPerson = "wanted_person"
+	// BoosterFaceRecognition matches the faces in a picture against a
+	// collection of faces: one of the workspace's own or a public one.
+	BoosterFaceRecognition = "face_recognition"
 	// BoosterOCR reads the text in a picture, or answers a prompt about it.
 	BoosterOCR = "ocr"
 )
@@ -34,10 +34,18 @@ func OCRBooster(prompt string) Booster {
 	return Booster{Name: BoosterOCR, Options: map[string]any{"prompt": prompt}}
 }
 
-// WantedPersonBooster is the wanted_person booster with a match threshold.
-// Sent as {"name": "wanted_person", "options": {"threshold": ...}}.
-func WantedPersonBooster(threshold float64) Booster {
-	return Booster{Name: BoosterWantedPerson, Options: map[string]any{"threshold": threshold}}
+// FaceRecognitionBooster is the face_recognition booster searching a
+// collection: a public collection's name or the id of one of the
+// workspace's own. A threshold of 0 to 1 sets the lowest score a match may
+// have; nil leaves the server's default (0.5). Sent as {"name":
+// "face_recognition", "options": {"collection": ..., "threshold": ...}}, as
+// given: the API checks both.
+func FaceRecognitionBooster(collection string, threshold *float64) Booster {
+	opts := map[string]any{"collection": collection}
+	if threshold != nil {
+		opts["threshold"] = *threshold
+	}
+	return Booster{Name: BoosterFaceRecognition, Options: opts}
 }
 
 // Booster asks a booster to read the request's images before the decision,
@@ -191,7 +199,7 @@ type Evidence struct {
 }
 
 // Reading is one booster's reading of one image: an *AgeReading, an
-// *AIGeneratedReading, a *FaceDetectionReading, a *WantedPersonReading, an
+// *AIGeneratedReading, a *FaceDetectionReading, a *FaceRecognitionReading, an
 // *OCRReading, or an *UnknownReading for a booster
 // this version of the package does not know or a reading with a field
 // missing or of the wrong type.
@@ -269,25 +277,29 @@ type FaceDetectionReading struct {
 	Detections []FaceDetection
 }
 
-// WantedMatch is one face of a wanted_person reading that matches an entry
-// of the list: its box, the match score and the entry's reference id, never
-// a name or any personal detail.
-type WantedMatch struct {
+// FaceMatch is one face of a face_recognition reading that matches an item
+// of the collection searched: its box, the match score, the collection and
+// the item's reference, and Name (a public figure's) or Label (an item of
+// the workspace's own collection that has one), "" when not sent.
+type FaceMatch struct {
 	Box FaceBox
 	// Score is 0 to 1.
-	Score     float64
-	Reference string
+	Score      float64
+	Collection string
+	Reference  string
+	Name       string
+	Label      string
 }
 
-// WantedPersonReading is the wanted_person booster's reading of one picture:
-// Faces, how many faces were checked, and Matches, the faces that match an
-// entry of the list.
-type WantedPersonReading struct {
+// FaceRecognitionReading is the face_recognition booster's reading of one
+// picture: Faces, how many faces were searched, and Matches, the faces that
+// match an item of the collection, by score.
+type FaceRecognitionReading struct {
 	readingBase
 	// Image is the id of the image read.
 	Image   string
 	Faces   int
-	Matches []WantedMatch
+	Matches []FaceMatch
 }
 
 // OCRReading is the ocr booster's reading of one picture: the text it shows,
@@ -459,22 +471,25 @@ func parseReading(booster string, v any) Reading {
 			r.Detections = append(r.Detections, FaceDetection{Box: box, Confidence: conf})
 		}
 		return r
-	case BoosterWantedPerson:
+	case BoosterFaceRecognition:
 		faces, ok := wholeNumber(raw["faces"])
 		list, isList := raw["matches"].([]any)
 		if !ok || faces < 0 || !isList {
 			return unknown
 		}
-		r := &WantedPersonReading{readingBase: base, Image: image, Faces: faces, Matches: []WantedMatch{}}
+		r := &FaceRecognitionReading{readingBase: base, Image: image, Faces: faces, Matches: []FaceMatch{}}
 		for _, x := range list {
 			m, _ := x.(map[string]any)
 			box, okBox := faceBox(m["box"])
 			score, okScore := m["score"].(float64)
+			collection, okCollection := m["collection"].(string)
 			ref, okRef := m["reference"].(string)
-			if !okBox || !okScore || !okRef {
+			name, okName := optionalString(m["name"])
+			label, okLabel := optionalString(m["label"])
+			if !okBox || !okScore || !okCollection || !okRef || !okName || !okLabel {
 				return unknown
 			}
-			r.Matches = append(r.Matches, WantedMatch{Box: box, Score: score, Reference: ref})
+			r.Matches = append(r.Matches, FaceMatch{Box: box, Score: score, Collection: collection, Reference: ref, Name: name, Label: label})
 		}
 		return r
 	case BoosterOCR:
@@ -487,6 +502,16 @@ func parseReading(booster string, v any) Reading {
 		return &OCRReading{readingBase: base, Image: image, Text: text, Truncated: truncated}
 	}
 	return unknown
+}
+
+// optionalString reads a field that is a string or absent (or null): ""
+// when absent, ok false for any other value.
+func optionalString(v any) (string, bool) {
+	if v == nil {
+		return "", true
+	}
+	s, ok := v.(string)
+	return s, ok
 }
 
 // faceBox reads a box's four corners, each a JSON number.
