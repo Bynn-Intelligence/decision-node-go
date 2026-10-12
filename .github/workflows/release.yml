@@ -1,0 +1,134 @@
+name: release
+
+# Every push to main runs the dry run: the module checked as it would be
+# published, with read access only and no secret. A tag vX.Y.Z on main runs
+# the dry run on the tag and then, once a person approves it, the publish
+# job, which creates the GitHub release. Go has no registry upload:
+# proxy.golang.org and pkg.go.dev read the tag from this repository once it
+# is public.
+#
+# What this workflow needs, set up by the repository's owners:
+# - Environment "release" with required reviewers (a person approves every
+#   publish run before it starts) and a deployment rule that allows only v*
+#   tags. It holds no secret.
+# - Secrets: none. The publish job uses the workflow's own GITHUB_TOKEN with
+#   contents: write on this repository, and writes to no other repository.
+#
+# Before tagging, the CHANGELOG's top entry carries the version and its
+# release date ("## [0.4.0] - 2026-10-20"), and version.go the same version.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Verify the dependencies
+        run: go mod verify
+      - name: Check the module path
+        run: |
+          path="$(go list -m)"
+          if [ "$path" != "github.com/Bynn-Intelligence/decision-node-go" ]; then
+            echo "::error::go.mod names the module $path"
+            exit 1
+          fi
+      - name: Check the version
+        shell: bash
+        run: |
+          top="$(grep -m1 -E '^## \[' CHANGELOG.md)"
+          version="$(sed -nE 's/^## \[([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?)\].*/\1/p' <<<"$top")"
+          if [ -z "$version" ]; then
+            echo "::error::the CHANGELOG's top entry is not a version: $top"
+            exit 1
+          fi
+          code="$(sed -nE 's/^const Version = "([^"]+)"$/\1/p' version.go)"
+          if [ "$code" != "$version" ]; then
+            echo "::error::version.go says '$code', the CHANGELOG's top entry $version"
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+              echo "::error::the tag $GITHUB_REF_NAME does not match the CHANGELOG's top entry $version"
+              exit 1
+            fi
+            if ! grep -qE '^## \[[^]]+\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$' <<<"$top"; then
+              echo "::error::the CHANGELOG entry for $version has no release date: $top"
+              exit 1
+            fi
+          fi
+          echo "version $version"
+      # The module zip holds every file of the repository at the tag.
+      - name: Check the published files
+        run: git ls-files -z | xargs -0 python3 .github/scripts/check-published.py --readme README.md
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: dry-run
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Only a commit already on main is released: a tag pushed on any other
+      # branch stops here.
+      - name: Check that the tag is on main
+        shell: bash
+        run: |
+          tagged="$(git rev-parse "${GITHUB_REF}^{commit}")"
+          if ! git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null; then
+            echo "::error::origin/main was not fetched; cannot check the tag"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$tagged" refs/remotes/origin/main; then
+            echo "::error::${GITHUB_REF_NAME} points at $tagged, which is not on main"
+            exit 1
+          fi
+          echo "${GITHUB_REF_NAME} ($tagged) is on main"
+      - name: Release notes from the CHANGELOG
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v head="## [$version]" '
+            index($0, head) == 1 { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md | sed -e '/./,$!d' > "$RUNNER_TEMP/notes.md"
+          if [ ! -s "$RUNNER_TEMP/notes.md" ]; then
+            echo "::error::the CHANGELOG has no section for $version"
+            exit 1
+          fi
+          python3 .github/scripts/check-published.py "$RUNNER_TEMP/notes.md"
+      - name: Create the GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}"
+      # proxy.golang.org fetches the version on the first request for it,
+      # which works only once this repository is public. A failure here does
+      # not undo the release; ask again later with the same URL.
+      - name: Ask proxy.golang.org for the version
+        continue-on-error: true
+        run: curl -fsS --retry 3 "https://proxy.golang.org/github.com/!bynn-!intelligence/decision-node-go/@v/${GITHUB_REF_NAME}.info"
