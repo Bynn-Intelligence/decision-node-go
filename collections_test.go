@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -52,6 +53,10 @@ func TestCollections(t *testing.T) {
 	if got := string(rec.bodies[0]); got != `{"type":"face","name":"Staff"}` {
 		t.Fatalf("create body: %s", got)
 	}
+	uuid4 := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	if key := rec.heads[0].Get("Idempotency-Key"); !uuid4.MatchString(key) {
+		t.Fatalf("create's Idempotency-Key: %q", key)
+	}
 	list, err := c.Collections().List(ctx)
 	if err != nil || len(list) != 2 || list[0].Deletion == nil || list[0].Deletion.Reason != "storage_unpaid" || !list[1].Public {
 		t.Fatalf("list: %#v %v", list, err)
@@ -62,6 +67,10 @@ func TestCollections(t *testing.T) {
 	}
 	if got := string(rec.bodies[2]); got != `{"image":{"id":"badge","url":"https://files.example.com/b.jpg"},"reference":"emp-1042"}` {
 		t.Fatalf("enroll body: %s", got)
+	}
+	if rec.heads[1].Get("Idempotency-Key") != "" || !uuid4.MatchString(rec.heads[2].Get("Idempotency-Key")) ||
+		rec.heads[2].Get("Idempotency-Key") == rec.heads[0].Get("Idempotency-Key") {
+		t.Fatalf("keys: list %q, enroll %q", rec.heads[1].Get("Idempotency-Key"), rec.heads[2].Get("Idempotency-Key"))
 	}
 	page, err := c.Collections().ListItems(ctx, "col_1", dn.ItemListOptions{Limit: dn.Ptr(5)})
 	if err != nil || len(page.Items) != 1 || page.Items[0].Label != "Reception" || page.NextOffset != nil || seen(3).RawQuery != "limit=5" {
@@ -110,6 +119,36 @@ func TestCollectionsCheckedLocally(t *testing.T) {
 	}
 	if len(rec.bodies) != 0 {
 		t.Fatalf("sent %d requests", len(rec.bodies))
+	}
+}
+
+// A create is retried with its key: a 500, then a 409 idempotency_in_progress
+// after its wait, then the answer, all three attempts with one key; a 409
+// idempotency_key_reused is raised at once.
+func TestCollectionsRetriedWithTheirKey(t *testing.T) {
+	srv, rec := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		switch n {
+		case 1:
+			respond(w, 500, `{"detail":{"error_type":"api_error","message":"Something went wrong on our side."}}`, nil)
+		case 2:
+			respond(w, 409, `{"detail":{"error_type":"idempotency_in_progress","message":"A request with this Idempotency-Key is still running."}}`, map[string]string{"retry-after-ms": "5"})
+		case 3:
+			respond(w, 201, `{"id":"col_1","type":"face","name":"Staff","public":false,"items":0}`, nil)
+		default:
+			respond(w, 409, `{"detail":{"error_type":"idempotency_key_reused","message":"This Idempotency-Key was already used with a different request."}}`, nil)
+		}
+	})
+	c := client(t, srv.URL, dn.WithMaxRetries(3))
+	if _, err := c.Collections().Create(context.Background(), "Staff", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.heads) != 3 || rec.heads[0].Get("Idempotency-Key") != rec.heads[1].Get("Idempotency-Key") || rec.heads[1].Get("Idempotency-Key") != rec.heads[2].Get("Idempotency-Key") {
+		t.Fatalf("attempts %d, keys differ", len(rec.heads))
+	}
+	_, err := c.Collections().Create(context.Background(), "Staff", "")
+	var e *dn.Error
+	if !errors.As(err, &e) || e.Status != 409 || e.ErrorType != "idempotency_key_reused" || len(rec.heads) != 4 {
+		t.Fatalf("reused: %v after %d attempts", err, len(rec.heads))
 	}
 }
 

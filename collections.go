@@ -3,6 +3,7 @@ package decisionnode
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -137,8 +138,10 @@ func (c *Client) Collections() *CollectionService { return &CollectionService{c:
 // Create creates a collection with POST /v1/collections. typ "" is "face",
 // the only type. The name is 1 to 80 characters; a name or a type the API
 // would refuse is refused locally with a *ValidationError and its entries.
-// Create is retried only on 429 and 529, since a repeat after a lost answer
-// could create a second collection.
+// The call carries an Idempotency-Key, new for each call and the same on
+// every attempt, so it is retried like any call and creates one collection
+// however often it is sent; a 409 idempotency_in_progress is retried after
+// its Retry-After.
 func (s *CollectionService) Create(ctx context.Context, name, typ string) (*Collection, error) {
 	if s.c.err != nil {
 		return nil, s.c.err
@@ -169,7 +172,11 @@ func (s *CollectionService) Create(ctx context.Context, name, typ string) (*Coll
 	if err != nil {
 		return nil, encodeError(err)
 	}
-	resp, err := s.c.call(ctx, http.MethodPost, "/v1/collections", body, callOptions{policy: retryMutation})
+	key, err := newIdempotencyKey()
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.c.call(ctx, http.MethodPost, "/v1/collections", body, callOptions{policy: retryIdempotent, idempotencyKey: key})
 	if err != nil {
 		return nil, err
 	}
@@ -231,8 +238,8 @@ func (s *CollectionService) Delete(ctx context.Context, collectionID string) (*D
 // face in the image. The reference, the label and the image are checked
 // locally as the API checks them (a *ValidationError, or the image errors a
 // decision raises). An image with no face is the API's *ValidationError
-// with the entry no_face. Enroll is retried only on 429 and 529, since a
-// repeat would enroll and bill the face twice.
+// with the entry no_face. The call carries an Idempotency-Key, as Create
+// does, so a retry never enrolls or bills the face twice.
 func (s *CollectionService) Enroll(ctx context.Context, collectionID string, e Enrollment) (*CollectionItem, error) {
 	if s.c.err != nil {
 		return nil, s.c.err
@@ -288,7 +295,12 @@ func (s *CollectionService) Enroll(ctx context.Context, collectionID string, e E
 		if err := checkBodySize(buf.Len()); err != nil {
 			return nil, err
 		}
-		resp, err := s.c.call(ctx, http.MethodPost, path, buf.Bytes(), callOptions{policy: retryMutation})
+		// A resend after a stale upload is another body, so it has its own key.
+		key, err := newIdempotencyKey()
+		if err != nil {
+			return nil, err
+		}
+		resp, err := s.c.call(ctx, http.MethodPost, path, buf.Bytes(), callOptions{policy: retryIdempotent, idempotencyKey: key})
 		if err != nil && resend == 0 && len(pl.placed) > 0 && staleUpload(err) {
 			s.c.uploads.drop(pl.placed)
 			continue
@@ -365,6 +377,18 @@ func (s *CollectionService) delete(ctx context.Context, path string) (*Deleted, 
 	d.ID, _ = raw["id"].(string)
 	d.Deleted, _ = raw["deleted"].(bool)
 	return d, nil
+}
+
+// newIdempotencyKey is a random UUID (version 4) for one call's
+// Idempotency-Key.
+func newIdempotencyKey() (string, error) {
+	var b [16]byte
+	if _, err := cryptorand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("decisionnode: no randomness for an Idempotency-Key: %w", err)
+	}
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
 // collectionPath is a collection's path, its id escaped as given.

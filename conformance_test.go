@@ -2511,6 +2511,43 @@ func checkSequence(expected []any, log []mockRecord) error {
 	return nil
 }
 
+// checkSameHeader checks that every logged request matching the spec's
+// path_suffix and method (at least min, default 2) carries the header with
+// one and the same value, matching pattern when given.
+func checkSameHeader(spec map[string]any, log []mockRecord) error {
+	name := strings.ToLower(spec["name"].(string))
+	var values []string
+	for _, r := range log {
+		if suffix, ok := spec["path_suffix"].(string); ok && !strings.HasSuffix(r.Path, suffix) {
+			continue
+		}
+		if method, ok := spec["method"].(string); ok && r.Method != method {
+			continue
+		}
+		v, present := r.Headers[name]
+		if !present {
+			return fmt.Errorf("same_header %s: an attempt of %s %s carries none", name, r.Method, r.Path)
+		}
+		values = append(values, v)
+	}
+	least := 2
+	if m, ok := spec["min"].(float64); ok {
+		least = int(m)
+	}
+	if len(values) < least {
+		return fmt.Errorf("same_header %s: expected at least %d attempts, got %d", name, least, len(values))
+	}
+	for _, v := range values[1:] {
+		if v != values[0] {
+			return fmt.Errorf("same_header %s: expected one value on every attempt, got %v", name, values)
+		}
+	}
+	if p, ok := spec["pattern"].(string); ok && !regexp.MustCompile(p).MatchString(values[0]) {
+		return fmt.Errorf("same_header %s: %q does not match %s", name, values[0], p)
+	}
+	return nil
+}
+
 func checkCounts(expected []any, log []mockRecord) error {
 	for _, item := range expected {
 		spec := item.(map[string]any)
@@ -2629,6 +2666,11 @@ func runBehaviour(t *testing.T, root string, m *mock, c *object) error {
 	}
 	if counts, ok := exp["request_counts"].([]any); ok {
 		if e := checkCounts(counts, info.Requests); e != nil {
+			return e
+		}
+	}
+	if same, ok := exp["same_header"].(map[string]any); ok {
+		if e := checkSameHeader(same, info.Requests); e != nil {
 			return e
 		}
 	}

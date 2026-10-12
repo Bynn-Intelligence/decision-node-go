@@ -833,6 +833,11 @@ const (
 	retryMutation
 	// retryNever sends once.
 	retryNever
+	// retryIdempotent is a call that carries its own Idempotency-Key, the
+	// same on every attempt, so the server applies it once however often
+	// it is sent: it retries as retryDefault, and also a 409
+	// idempotency_in_progress, after its Retry-After.
+	retryIdempotent
 )
 
 // callOptions are the per-call settings of call.
@@ -844,6 +849,8 @@ type callOptions struct {
 	// noRetryAfterTimeout stops the retries after an attempt that timed
 	// out: the server finishes it and may bill it.
 	noRetryAfterTimeout bool
+	// idempotencyKey, when set, is sent as Idempotency-Key on every attempt.
+	idempotencyKey string
 }
 
 // doPayload sends an encoded body (nil for none) with retries and returns the
@@ -866,7 +873,7 @@ func (c *Client) call(ctx context.Context, method, path string, payload []byte, 
 		timeout = o.timeout
 	}
 	for attempt := 0; ; attempt++ {
-		resp, header, err := c.attempt(ctx, method, path, payload, o.contentType, attempt, timeout)
+		resp, header, err := c.attempt(ctx, method, path, payload, o, attempt, timeout)
 		if err == nil {
 			return resp, nil
 		}
@@ -889,7 +896,7 @@ func (c *Client) call(ctx context.Context, method, path string, payload []byte, 
 	}
 }
 
-func (c *Client) attempt(ctx context.Context, method, path string, payload []byte, contentType string, attempt int, timeout time.Duration) (*response, http.Header, error) {
+func (c *Client) attempt(ctx context.Context, method, path string, payload []byte, o callOptions, attempt int, timeout time.Duration) (*response, http.Header, error) {
 	// One deadline for the whole attempt: connecting, sending, the response
 	// headers and every byte of the body.
 	actx, cancel := context.WithTimeout(ctx, timeout)
@@ -907,6 +914,7 @@ func (c *Client) attempt(ctx context.Context, method, path string, payload []byt
 	req.Header.Set("User-Agent", UserAgent)
 	req.Header.Set("Accept", "application/json")
 	if payload != nil {
+		contentType := o.contentType
 		if contentType == "" {
 			contentType = "application/json"
 		}
@@ -914,6 +922,9 @@ func (c *Client) attempt(ctx context.Context, method, path string, payload []byt
 	}
 	for k, vs := range c.headers {
 		req.Header[k] = append([]string(nil), vs...)
+	}
+	if o.idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", o.idempotencyKey)
 	}
 
 	start := time.Now()
@@ -985,8 +996,10 @@ func (c *Client) log(ctx context.Context, method, path string, status int, reque
 
 // retryable reports whether an error is worth another attempt under a
 // policy. By default: 408, 429, every 5xx, timeouts and connection errors.
-// For a mutation: 429 and 529 only. A 429 session_limit_exceeded never: the
-// count frees when a session ends, not when time passes.
+// For a mutation: 429 and 529 only. For a call with its own Idempotency-Key:
+// as by default, and a 409 idempotency_in_progress. A 429
+// session_limit_exceeded never: the count frees when a session ends, not
+// when time passes.
 func retryable(err error, policy retryPolicy) bool {
 	var sl *SessionLimitError
 	if errors.As(err, &sl) {
@@ -995,12 +1008,15 @@ func retryable(err error, policy retryPolicy) bool {
 	var te *TimeoutError
 	var ce *ConnectionError
 	if errors.As(err, &te) || errors.As(err, &ce) {
-		return policy == retryDefault
+		return policy == retryDefault || policy == retryIdempotent
 	}
 	var e *Error
 	if errors.As(err, &e) {
 		if policy == retryMutation {
 			return e.Status == 429 || e.Status == 529
+		}
+		if policy == retryIdempotent && e.Status == 409 && e.ErrorType == "idempotency_in_progress" {
+			return true
 		}
 		return e.Status == 408 || e.Status == 429 || (e.Status >= 500 && e.Status <= 599)
 	}
