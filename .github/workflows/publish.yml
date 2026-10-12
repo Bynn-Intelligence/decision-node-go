@@ -1,0 +1,73 @@
+# Runs only while the repository is public: nothing is tagged or released while it is private.
+#
+# Auto-release decision-node-go on every push to main. Go has no registry to
+# upload to: a module version is a git tag on a public repository. The
+# workflow runs the checks, keeps version.go in step with the tag, cuts the
+# tag, creates the GitHub release, and asks the module proxy for the new
+# version so it is indexed before the first real consumer arrives. The push
+# back uses the default GITHUB_TOKEN, which does not retrigger this workflow,
+# and the bump commit carries [skip publish] as a second guard.
+#
+# The version in version.go (the CHANGELOG's top entry) is released as it
+# stands while no tag names it yet; after that every run bumps the patch
+# first.
+#
+# To ship without cutting a release (docs, CI tweaks), put [skip publish] in
+# the commit message.
+name: Release Go module
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions: read-all
+
+jobs:
+  publish:
+    if: "github.event.repository.visibility == 'public' && !contains(github.event.head_commit.message, '[skip publish]')"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.23'
+
+      - run: go vet ./...
+      # The conformance suite runs in CI, against its own checkout.
+      - run: go test -skip TestConformance ./...
+
+      - id: bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          CURRENT=$(sed -nE 's/^const Version = "([^"]+)"$/\1/p' version.go)
+          [ -n "${CURRENT}" ] || { echo "::error::no version in version.go"; exit 1; }
+          if git rev-parse -q --verify "refs/tags/v${CURRENT}" >/dev/null; then
+            NEW="${CURRENT%.*}.$(( ${CURRENT##*.} + 1 ))"
+            sed -i "s/^const Version = \"${CURRENT}\"$/const Version = \"${NEW}\"/" version.go
+            git add version.go
+            git commit -m "Release v${NEW} [skip publish]"
+          else
+            NEW="${CURRENT}"
+          fi
+          git tag "v${NEW}"
+          git push origin HEAD:main "v${NEW}"
+          echo "version=${NEW}" >> "$GITHUB_OUTPUT"
+
+      - run: gh release create "v${{ steps.bump.outputs.version }}" --title "v${{ steps.bump.outputs.version }}" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      # Warm the module proxy so `go get` resolves the tag immediately. The
+      # exclamation marks are the proxy's escaping for the capital letters in
+      # Bynn-Intelligence.
+      - run: curl -sf "https://proxy.golang.org/github.com/!bynn-!intelligence/decision-node-go/@v/v${{ steps.bump.outputs.version }}.info" || true
