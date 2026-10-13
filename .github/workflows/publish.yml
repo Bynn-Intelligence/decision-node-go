@@ -46,7 +46,9 @@ jobs:
       - run: go test -skip TestConformance ./...
       # The module zip is every file of the repository at the tag; a file
       # that carries what a public package must not stops the release here.
-      - run: git ls-files -z | xargs -0 python3 .github/scripts/check-published.py --readme README.md
+      - run: python3 .github/scripts/check_names.py --tracked --commits
+        env:
+          DN_NAME_CHECK_WORDS: ${{ secrets.DN_NAME_CHECK_WORDS }}
 
       - id: bump
         run: |
