@@ -1,5 +1,7 @@
 # DecisionNode Go SDK
 
+[DecisionNode](https://decisionnode.com) is a decision engine: send it text, JSON or images with a question, and it answers with calibrated probabilities.
+
 The Go client for the [DecisionNode](https://decisionnode.com) API: ask structured questions about any state and get calibrated numbers back.
 
 - Six question types: `truth` (how likely a statement is true), `choice` (one option of a set), `score` (a place on an ordered scale), `number` (a value on a grid you define), `point` (a spot in an image) and `box` (a rectangle in an image).

@@ -1,5 +1,8 @@
 // Package decisionnode is the Go client for the DecisionNode API.
 //
+// DecisionNode is a decision engine: send it text, JSON or images with a
+// question, and it answers with calibrated probabilities.
+//
 // DecisionNode answers structured questions about a piece of state with
 // calibrated numbers: a truth question returns the probability that a
 // statement is true, a choice question picks one option with a probability
