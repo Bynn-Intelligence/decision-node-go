@@ -393,7 +393,7 @@ A request's `CustomID` is a pointer so a missing id and an empty one are told ap
 
 ## Collections
 
-A collection holds faces the `face_recognition` booster searches. `client.Collections()` creates, lists, reads and deletes the workspace's collections, and enrolls, lists, edits and deletes their items, each result with its fields as sent and `Raw`:
+A collection holds the faces of the people you enroll, for decisions to search. `client.Collections()` creates, lists, reads and deletes the workspace's collections, and enrolls, lists, edits and deletes their items, each result with its fields as sent and `Raw`:
 
 ```go
 col, err := client.Collections().Create(ctx, "Staff, Stockholm office", "")
