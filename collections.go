@@ -25,8 +25,8 @@ const (
 	MaxItemLabelChars = 128
 )
 
-// itemReferencePattern is the API's pattern for an item's reference; an
-// empty reference fails it.
+// itemReferencePattern is the API's pattern for an item's reference,
+// checked after the length.
 const itemReferencePattern = "^[A-Za-z0-9_.:-]{1,64}$"
 
 var itemReference = regexp.MustCompile(itemReferencePattern)
@@ -154,10 +154,10 @@ func (s *CollectionService) Create(ctx context.Context, name, typ string) (*Coll
 	reason := ""
 	if typ != "face" {
 		entries = append(entries, map[string]any{"type": "literal_error", "loc": []any{"body", "type"}, "msg": "Input should be 'face'",
-			"input": typ, "ctx": map[string]any{"expected": "'face'"}})
+			"input": echoed(typ), "ctx": map[string]any{"expected": "'face'"}})
 		reason = "type must be face"
 	}
-	if e := stringEntry([]any{"body", "name"}, name, 1, MaxCollectionNameChars, false); e != nil {
+	if e := stringEntry([]any{"body", "name"}, name, MaxCollectionNameChars, false); e != nil {
 		entries = append(entries, e)
 		if reason == "" {
 			reason = fmt.Sprintf("name must be 1 to %d characters", MaxCollectionNameChars)
@@ -250,17 +250,17 @@ func (s *CollectionService) Enroll(ctx context.Context, collectionID string, e E
 	reason := ""
 	if e.Image.id == "" && e.Image.url == "" && e.Image.uploadID == "" && e.Image.src == nil {
 		entries = append(entries, map[string]any{"type": "missing", "loc": []any{"body", "image"}, "msg": "Field required",
-			"input": map[string]any{"reference": e.Reference}})
+			"input": nil})
 		reason = "image: Field required"
 	}
-	if en := stringEntry([]any{"body", "reference"}, e.Reference, 0, MaxItemReferenceChars, true); en != nil {
+	if en := stringEntry([]any{"body", "reference"}, e.Reference, MaxItemReferenceChars, true); en != nil {
 		entries = append(entries, en)
 		if reason == "" {
 			reason = fmt.Sprintf("reference must be 1 to %d characters of A-Z, a-z, 0-9, _ . : and -", MaxItemReferenceChars)
 		}
 	}
 	if e.Label != nil {
-		if en := stringEntry([]any{"body", "label"}, *e.Label, 0, MaxItemLabelChars, false); en != nil {
+		if en := stringEntry([]any{"body", "label"}, *e.Label, MaxItemLabelChars, false); en != nil {
 			entries = append(entries, en)
 			if reason == "" {
 				reason = fmt.Sprintf("label must be at most %d characters", MaxItemLabelChars)
@@ -423,18 +423,18 @@ func pageQuery(offset, limit *int) (string, error) {
 	return "?" + encodeOrdered(q, "offset", "limit"), nil
 }
 
-// stringEntry is the API's 422 entry for a string field out of its bounds,
-// counted in characters, or not of the item reference's pattern; nil when it
-// is within them.
-func stringEntry(loc []any, v string, least, most int, reference bool) map[string]any {
-	n := utf8.RuneCountInString(v)
+// stringEntry is the API's 422 entry for a string field that is empty,
+// longer than most characters (code points) or, for an item's reference,
+// not of its pattern, checked in that order; nil when it is none of them.
+// Its input is echoed as the API echoes it.
+func stringEntry(loc []any, v string, most int, reference bool) map[string]any {
 	switch {
-	case n < least:
-		return map[string]any{"type": "string_too_short", "loc": loc, "msg": fmt.Sprintf("String should have at least %d character%s", least, plural(least)),
-			"input": v, "ctx": map[string]any{"min_length": least}}
-	case n > most:
+	case v == "":
+		return map[string]any{"type": "string_too_short", "loc": loc, "msg": "String should have at least 1 character",
+			"input": "", "ctx": map[string]any{"min_length": 1}}
+	case utf8.RuneCountInString(v) > most:
 		return map[string]any{"type": "string_too_long", "loc": loc, "msg": fmt.Sprintf("String should have at most %d characters", most),
-			"input": v, "ctx": map[string]any{"max_length": most}}
+			"input": echoed(v), "ctx": map[string]any{"max_length": most}}
 	case reference && !itemReference.MatchString(v):
 		return map[string]any{"type": "string_pattern_mismatch", "loc": loc, "msg": fmt.Sprintf("String should match pattern '%s'", itemReferencePattern),
 			"input": v, "ctx": map[string]any{"pattern": itemReferencePattern}}
@@ -442,11 +442,16 @@ func stringEntry(loc []any, v string, least, most int, reference bool) map[strin
 	return nil
 }
 
-func plural(n int) string {
-	if n == 1 {
-		return ""
+// echoChars is how much of a string a collections 422 entry echoes.
+const echoChars = 64
+
+// echoed is a string as a collections 422 entry echoes it: its first 64
+// characters (code points), with "..." when it was longer.
+func echoed(v string) string {
+	if utf8.RuneCountInString(v) <= echoChars {
+		return v
 	}
-	return "s"
+	return string([]rune(v)[:echoChars]) + "..."
 }
 
 func parseCollectionResponse(resp *response) (*Collection, error) {

@@ -153,3 +153,35 @@ func TestCollectionsRetriedWithTheirKey(t *testing.T) {
 }
 
 func second[T any](_ T, err error) error { return err }
+
+// An empty label is too short, and a long input is echoed as the API
+// echoes it: its first 64 characters and "...".
+func TestCollectionsEntriesEchoed(t *testing.T) {
+	srv, rec := server(t, func(w http.ResponseWriter, r *http.Request, n int) { respond(w, 500, `{}`, nil) })
+	c := client(t, srv.URL)
+	ctx := context.Background()
+	badge := dn.ImageURL("badge", "https://files.example.com/b.jpg")
+	entry := func(err error) map[string]any {
+		var ve *dn.ValidationError
+		if !errors.As(err, &ve) || len(ve.Entries) != 1 {
+			t.Fatalf("%v", err)
+		}
+		e, _ := ve.Entries[0].(map[string]any)
+		return e
+	}
+	if e := entry(second(c.Collections().Enroll(ctx, "col_1", dn.Enrollment{Image: badge, Reference: "r", Label: dn.Ptr("")}))); e["type"] != "string_too_short" || e["input"] != "" {
+		t.Fatalf("empty label: %#v", e)
+	}
+	if e := entry(second(c.Collections().Create(ctx, strings.Repeat("é", 81), ""))); e["type"] != "string_too_long" || e["input"] != strings.Repeat("é", 64)+"..." {
+		t.Fatalf("long name: %#v", e)
+	}
+	if e := entry(second(c.Collections().Enroll(ctx, "col_1", dn.Enrollment{Image: badge, Reference: ""}))); e["type"] != "string_too_short" {
+		t.Fatalf("empty reference: %#v", e)
+	}
+	if e := entry(second(c.Collections().Enroll(ctx, "col_1", dn.Enrollment{Reference: "r"}))); e["type"] != "missing" || e["input"] != nil {
+		t.Fatalf("missing image: %#v", e)
+	}
+	if len(rec.bodies) != 0 {
+		t.Fatalf("sent %d requests", len(rec.bodies))
+	}
+}
