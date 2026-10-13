@@ -698,6 +698,7 @@ func normError(err error) any {
 		"entries":     nil,
 		"retry_after": nil,
 		"boosters":    normBoosters(base.Boosters),
+		"details":     base.Details,
 	}
 	if base.Status != 0 {
 		out["status"] = base.Status
@@ -1449,7 +1450,26 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 		if v, ok := get(args, "label"); ok && v != nil {
 			e.Label = dn.Ptr(str(plainArg(v, r)))
 		}
+		if v, ok := get(args, "metadata"); ok && v != nil {
+			e.Metadata = metadataArg(v)
+		}
 		return c.Collections().Enroll(ctx, str(plainArg(args.vals["collection_id"], r)), e)
+	case "collections.update_item":
+		var u dn.ItemUpdate
+		if v, ok := get(args, "reference"); ok {
+			u.Reference = dn.Ptr(str(plainArg(v, r)))
+		}
+		if v, ok := get(args, "label"); ok {
+			if v == nil {
+				u.ClearLabel = true
+			} else {
+				u.Label = dn.Ptr(str(plainArg(v, r)))
+			}
+		}
+		if v, ok := get(args, "metadata"); ok {
+			u.Metadata = metadataArg(v)
+		}
+		return c.Collections().UpdateItem(ctx, str(plainArg(args.vals["collection_id"], r)), str(plainArg(args.vals["item_id"], r)), u)
 	case "collections.list_items":
 		var opts dn.ItemListOptions
 		if n, ok := args.vals["offset"].(json.Number); ok {
@@ -1459,6 +1479,12 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 		if n, ok := args.vals["limit"].(json.Number); ok {
 			i, _ := n.Int64()
 			opts.Limit = dn.Ptr(int(i))
+		}
+		if v, ok := get(args, "reference"); ok && v != nil {
+			opts.Reference = dn.Ptr(str(plainArg(v, r)))
+		}
+		if v, ok := get(args, "reference_prefix"); ok && v != nil {
+			opts.ReferencePrefix = dn.Ptr(str(plainArg(v, r)))
 		}
 		return c.Collections().ListItems(ctx, str(plainArg(args.vals["collection_id"], r)), opts)
 	case "collections.delete_item":
@@ -1976,7 +2002,8 @@ func checkCollectionResult(kind string, want, result any, path string) error {
 		if p.NextOffset != nil {
 			next = *p.NextOffset
 		}
-		got = canon(map[string]any{"items": items, "offset": p.Offset, "limit": p.Limit, "total": p.Total, "next_offset": next})
+		got = canon(map[string]any{"items": items, "offset": p.Offset, "limit": p.Limit, "total": p.Total, "next_offset": next,
+			"total_capped": p.TotalCapped, "reference": nilIfEmpty(p.Reference), "reference_prefix": nilIfEmpty(p.ReferencePrefix)})
 	case "deleted":
 		d, ok := result.(*dn.Deleted)
 		if !ok {
@@ -2008,6 +2035,9 @@ func normItem(it *dn.CollectionItem) any {
 	if it.Box != nil {
 		m["box"] = normBox(*it.Box)
 	}
+	if _, ok := it.Raw["metadata"]; ok {
+		m["metadata"] = it.Metadata
+	}
 	if it.Usage != nil {
 		u := map[string]any{"enrollments": intOrNil(it.Usage.Enrollments)}
 		if it.Usage.Cost != nil {
@@ -2016,6 +2046,16 @@ func normItem(it *dn.CollectionItem) any {
 		m["usage"] = u
 	}
 	return canon(m)
+}
+
+// metadataArg is a metadata argument as the SDK takes it: an object of
+// keys and values, numbers kept as written.
+func metadataArg(v any) map[string]any {
+	dec := json.NewDecoder(bytes.NewReader(raw(v)))
+	dec.UseNumber()
+	m := map[string]any{}
+	_ = dec.Decode(&m)
+	return m
 }
 
 func normBatchPage(p *dn.BatchPage) any {

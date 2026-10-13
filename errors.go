@@ -38,6 +38,9 @@ type Error struct {
 	// from the x-decisionnode-boosters header, in the request's order: it
 	// shows which required booster failed. Nil when the header is absent.
 	Boosters []BoosterStatus
+	// Details is detail.details of the response body when it is an object,
+	// such as {"reason": "enrollment_unpriced"}; nil otherwise.
+	Details map[string]any
 	// Err is the underlying cause, such as a network error, when there is one.
 	Err error
 
@@ -207,6 +210,7 @@ func newError(status int, header http.Header, body []byte) error {
 			base.ErrorType, _ = detail["error_type"].(string)
 			base.msg, _ = detail["message"].(string)
 			category, _ = detail["category"].(string)
+			base.Details, _ = detail["details"].(map[string]any)
 		case string:
 			base.msg = detail
 		case []any:

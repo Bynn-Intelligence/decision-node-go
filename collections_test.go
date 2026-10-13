@@ -185,3 +185,83 @@ func TestCollectionsEntriesEchoed(t *testing.T) {
 		t.Fatalf("sent %d requests", len(rec.bodies))
 	}
 }
+
+// UpdateItem sends only the fields given, a cleared label as null, and
+// carries its Idempotency-Key; metadata and the reference lookup are
+// checked locally.
+func TestUpdateItemAndLookup(t *testing.T) {
+	var (
+		mu   sync.Mutex
+		urls []*url.URL
+	)
+	srv, rec := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		mu.Lock()
+		urls = append(urls, r.URL)
+		mu.Unlock()
+		if r.Method == http.MethodPatch {
+			respond(w, 200, `{"id":"itm_1","reference":"emp-1042","label":null,"metadata":{"site":"north"},"created_at":"2026-10-12T09:00:00Z"}`, nil)
+			return
+		}
+		respond(w, 200, `{"items":[],"offset":0,"limit":20,"total":0,"next_offset":null,"total_capped":false,"reference":null,"reference_prefix":"emp-"}`, nil)
+	})
+	c := client(t, srv.URL)
+	ctx := context.Background()
+	item, err := c.Collections().UpdateItem(ctx, "col_1", "itm_1", dn.ItemUpdate{ClearLabel: true, Metadata: map[string]any{"site": "north"}})
+	if err != nil || item.Label != "" || item.Metadata["site"] != "north" {
+		t.Fatalf("%#v %v", item, err)
+	}
+	if got := string(rec.bodies[0]); got != `{"label":null,"metadata":{"site":"north"}}` || rec.heads[0].Get("Idempotency-Key") == "" {
+		t.Fatalf("body %s", got)
+	}
+	page, err := c.Collections().ListItems(ctx, "col_1", dn.ItemListOptions{ReferencePrefix: dn.Ptr("emp-")})
+	mu.Lock()
+	q := urls[1].RawQuery
+	mu.Unlock()
+	if err != nil || page.ReferencePrefix != "emp-" || q != "reference_prefix=emp-" {
+		t.Fatalf("%#v %v %s", page, err, q)
+	}
+	var ve *dn.ValidationError
+	_, err = c.Collections().UpdateItem(ctx, "col_1", "itm_1", dn.ItemUpdate{})
+	if !errors.As(err, &ve) || ve.Entries[0].(map[string]any)["type"] != "missing" {
+		t.Fatalf("no field: %v", err)
+	}
+	many := map[string]any{}
+	for i := 0; i < 21; i++ {
+		many[strings.Repeat("k", i+1)] = i
+	}
+	for name, m := range map[string]map[string]any{
+		"too many keys": many,
+		"bad key":       {"Bad Key": 1},
+		"long text":     {"note": strings.Repeat("x", 501)},
+		"list value":    {"tags": []any{"a"}},
+	} {
+		_, err := c.Collections().UpdateItem(ctx, "col_1", "itm_1", dn.ItemUpdate{Metadata: m})
+		if !errors.As(err, &ve) || len(ve.Entries) != 1 || ve.Entries[0].(map[string]any)["type"] != "value_error" {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	_, err = c.Collections().ListItems(ctx, "col_1", dn.ItemListOptions{Reference: dn.Ptr("a"), ReferencePrefix: dn.Ptr("b")})
+	var br *dn.BadRequestError
+	if !errors.As(err, &br) || !strings.Contains(br.Error(), "not both") {
+		t.Fatalf("both: %v", err)
+	}
+	_, err = c.Collections().ListItems(ctx, "col_1", dn.ItemListOptions{Reference: dn.Ptr("é x")})
+	if !errors.As(err, &br) || !strings.HasSuffix(br.Error(), `got \u{e9} x.`) {
+		t.Fatalf("pattern: %v", err)
+	}
+	if len(rec.bodies) != 2 {
+		t.Fatalf("sent %d requests", len(rec.bodies))
+	}
+}
+
+// A 529 whose details say the enrollment has no price is never retried.
+func TestEnrollmentUnpricedNotRetried(t *testing.T) {
+	srv, rec := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		respond(w, 529, `{"detail":{"error_type":"overloaded_error","message":"Face enrollment is not available on this deployment yet.","details":{"reason":"enrollment_unpriced"}}}`, nil)
+	})
+	_, err := client(t, srv.URL).Collections().Enroll(context.Background(), "col_1", dn.Enrollment{Image: dn.ImageURL("b", "https://files.example.com/b.jpg"), Reference: "r"})
+	var oe *dn.OverloadedError
+	if !errors.As(err, &oe) || oe.Details["reason"] != "enrollment_unpriced" || len(rec.bodies) != 1 {
+		t.Fatalf("%v after %d attempts", err, len(rec.bodies))
+	}
+}

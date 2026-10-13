@@ -391,9 +391,30 @@ It checks every request locally, creates an empty draft, adds the lines in calls
 
 A request's `CustomID` is a pointer so a missing id and an empty one are told apart: every line needs one, of 1 to 512 characters, unique within the call; a fault is refused locally with the API's message ("Line 2: custom_id \"a\" is already in the batch."). Each line carries its custom id, a model (the request's, else the client's) and a state. A line's local images follow the inline threshold per line. `Create`, `Add` and `Finalize` are retried only on 429 and 529, since a repeat after a lost answer could create a second draft; a `Finalize` answered 409 reads the batch and returns it when an earlier finalize went through.
 
+## Collections
+
+A collection holds faces the `face_recognition` booster searches. `client.Collections()` creates, lists, reads and deletes the workspace's collections, and enrolls, lists, edits and deletes their items, each result with its fields as sent and `Raw`:
+
+```go
+col, err := client.Collections().Create(ctx, "Staff, Stockholm office", "")
+item, err := client.Collections().Enroll(ctx, col.ID, dn.Enrollment{
+	Image:     dn.ImageURL("badge", "https://files.example.com/badges/emp-1042.jpg"),
+	Reference: "emp-1042",
+	Label:     dn.Ptr("Reception"),
+	Metadata:  map[string]any{"site": "stockholm", "floor": 3},
+})
+page, err := client.Collections().ListItems(ctx, col.ID, dn.ItemListOptions{ReferencePrefix: dn.Ptr("emp-")})
+item, err = client.Collections().UpdateItem(ctx, col.ID, item.ID, dn.ItemUpdate{ClearLabel: true})
+```
+
+- `Create`, `Enroll` and `UpdateItem` send an `Idempotency-Key`, a new UUID for each call and the same on every attempt, so they are retried like any call and applied once; a 409 `idempotency_in_progress` is retried after its wait.
+- `UpdateItem` sends only the fields given: `Reference`, `Label` (or `ClearLabel`, which sends `null` and removes it) and `Metadata`, which replaces the item's whole metadata (an empty map removes every key).
+- `ListItems` pages with `Offset` and `Limit`, and finds the items of one `Reference` or of a `ReferencePrefix`; the page carries `TotalCapped`, `Reference` and `ReferencePrefix` as sent.
+- Checked locally, with the API's entries: a name of 1 to 80 characters, a reference of 1 to 64 of `A-Z a-z 0-9 _ . : -`, a label of 1 to 128 characters, and metadata of at most 20 keys of 1 to 40 of `a-z 0-9 _`, each value a text of at most 500 characters, a number, or true or false. An enrolled image's URL is checked as a decision's.
+
 ## Errors
 
-Every error from the API or the network is an `*dn.Error` (also exported as `dn.DecisionNodeError`, the name every DecisionNode SDK uses for its base error) with `Status`, `ErrorType`, `RequestID` and `Reason` (the server's explanation in words, from the `x-decisionnode-error` header). `err.Error()` is the server's message exactly as sent, empty when it sent none, or the client's own description when no response arrived. Match the specific types with `errors.As`:
+Every error from the API or the network is an `*dn.Error` (also exported as `dn.DecisionNodeError`, the name every DecisionNode SDK uses for its base error) with `Status`, `ErrorType`, `RequestID`, `Reason` (the server's explanation in words, from the `x-decisionnode-error` header) and `Details` (the body's `detail.details` when it is an object, such as `{"reason": "enrollment_unpriced"}`, else nil). `err.Error()` is the server's message exactly as sent, empty when it sent none, or the client's own description when no response arrived. Match the specific types with `errors.As`:
 
 ```go
 var rate *dn.RateLimitError
@@ -419,13 +440,13 @@ case errors.As(err, &apiErr):
 | 401 | `*AuthenticationError` | |
 | 402 | `*InsufficientCreditError` | |
 | 403, refusal | `*RefusalError` | `Category` (`harm` or `self_harm`), `Safety` |
-| 403, any other (`booster_not_enabled`, a suspended workspace) | `*PermissionDeniedError` | |
+| 403, any other (`booster_not_enabled`, `key_scope_denied`, a suspended workspace) | `*PermissionDeniedError` | |
 | 404 | `*NotFoundError` | |
 | 413 | `*RequestTooLargeError`, never retried | |
 | 422 | `*ValidationError` | `Entries` |
 | 429 | `*RateLimitError` | `RetryAfter` (capped at 60 s) |
 | 429, `session_limit_exceeded` | `*SessionLimitError` (also a `*RateLimitError`), never retried | `RetryAfter` |
-| 529 (also `booster_unavailable`) | `*OverloadedError` | `RetryAfter` (capped at 60 s) |
+| 529 (also `booster_unavailable`) | `*OverloadedError` | `RetryAfter` (capped at 60 s); never retried when `Details["reason"]` is `enrollment_unpriced` |
 | other 5xx | `*ServerError` | |
 | any other status (405, 409, 408 after its retries, ...) | `*Error` with the status | |
 | no response | `*ConnectionError`, `*TimeoutError` | |

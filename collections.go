@@ -5,11 +5,15 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
+	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -78,6 +82,9 @@ type CollectionItem struct {
 	CreatedAt string
 	// Usage is what an enrollment billed; nil on a listed item.
 	Usage *EnrollmentUsage
+	// Metadata is the item's own keys and values as sent; nil when it has
+	// none.
+	Metadata map[string]any
 	// Raw is the item object as sent.
 	Raw map[string]any
 }
@@ -98,7 +105,13 @@ type CollectionItemPage struct {
 	Total  int
 	// NextOffset is the offset of the next page, nil on the last.
 	NextOffset *int
-	Raw        map[string]any
+	// TotalCapped is true when Total stopped counting at the server's cap.
+	TotalCapped bool
+	// Reference and ReferencePrefix are the page's filter, as sent; "" when
+	// none.
+	Reference       string
+	ReferencePrefix string
+	Raw             map[string]any
 }
 
 // Deleted is the answer to a delete: the id deleted and Deleted true.
@@ -119,6 +132,10 @@ type Enrollment struct {
 	Reference string
 	// Label, when not nil, is shown in a match: at most 128 characters.
 	Label *string
+	// Metadata, when not nil, is the item's own keys and values: at most 20
+	// keys of 1 to 40 characters of a-z, 0-9 and _, each value a text of at
+	// most 500 characters, a number, or true or false.
+	Metadata map[string]any
 }
 
 // ItemListOptions pages ListItems. A nil field is left to the server:
@@ -127,6 +144,11 @@ type Enrollment struct {
 type ItemListOptions struct {
 	Offset *int
 	Limit  *int
+	// Reference lists the items with exactly this reference, and
+	// ReferencePrefix those whose reference starts with it; one or the
+	// other, each 1 to 64 characters of A-Z, a-z, 0-9, _ . : and -.
+	Reference       *string
+	ReferencePrefix *string
 }
 
 // CollectionService is the Collections API: the workspace's collections of
@@ -267,6 +289,14 @@ func (s *CollectionService) Enroll(ctx context.Context, collectionID string, e E
 			}
 		}
 	}
+	if e.Metadata != nil {
+		if ms := metadataEntries(e.Metadata); len(ms) > 0 {
+			entries = append(entries, ms...)
+			if reason == "" {
+				reason = "metadata: " + ms[0].(map[string]any)["msg"].(string)
+			}
+		}
+	}
 	if len(entries) > 0 {
 		return nil, localValidation(reason, entries...)
 	}
@@ -297,6 +327,12 @@ func (s *CollectionService) Enroll(ctx context.Context, collectionID string, e E
 				return nil, err
 			}
 		}
+		if e.Metadata != nil {
+			buf.WriteByte(',')
+			if err := writeMember(&buf, "metadata", e.Metadata); err != nil {
+				return nil, err
+			}
+		}
 		buf.WriteByte('}')
 		if err := checkBodySize(buf.Len()); err != nil {
 			return nil, err
@@ -322,6 +358,101 @@ func (s *CollectionService) Enroll(ctx context.Context, collectionID string, e E
 	}
 }
 
+// ItemUpdate is what UpdateItem changes; a field left at its zero value is
+// not sent and stays as it is.
+type ItemUpdate struct {
+	// Reference, when not nil, replaces the item's reference.
+	Reference *string
+	// Label, when not nil, replaces the item's label; ClearLabel sends null
+	// instead, which removes it.
+	Label      *string
+	ClearLabel bool
+	// Metadata, when not nil, replaces the item's whole metadata; an empty
+	// map removes every key.
+	Metadata map[string]any
+}
+
+// UpdateItem changes an item with PATCH /v1/collections/{id}/items/{item_id},
+// sending only the fields given, and returns the item. They are checked
+// locally as Enroll checks them. It carries an Idempotency-Key, as Create
+// and Enroll do, and is retried as they are.
+func (s *CollectionService) UpdateItem(ctx context.Context, collectionID, itemID string, u ItemUpdate) (*CollectionItem, error) {
+	if s.c.err != nil {
+		return nil, s.c.err
+	}
+	if u.ClearLabel && u.Label != nil {
+		return nil, errors.New("decisionnode: give Label or ClearLabel, not both")
+	}
+	var entries []any
+	reason := ""
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+	member := func(name string, v any) error {
+		if buf.Len() > 1 {
+			buf.WriteByte(',')
+		}
+		return writeMember(&buf, name, v)
+	}
+	if u.Reference != nil {
+		if en := stringEntry([]any{"body", "reference"}, *u.Reference, MaxItemReferenceChars, true); en != nil {
+			entries = append(entries, en)
+			reason = fmt.Sprintf("reference must be 1 to %d characters of A-Z, a-z, 0-9, _ . : and -", MaxItemReferenceChars)
+		}
+		if err := member("reference", *u.Reference); err != nil {
+			return nil, err
+		}
+	}
+	switch {
+	case u.ClearLabel:
+		if err := member("label", nil); err != nil {
+			return nil, err
+		}
+	case u.Label != nil:
+		if en := stringEntry([]any{"body", "label"}, *u.Label, MaxItemLabelChars, false); en != nil {
+			entries = append(entries, en)
+			if reason == "" {
+				reason = fmt.Sprintf("label must be 1 to %d characters", MaxItemLabelChars)
+			}
+		}
+		if err := member("label", *u.Label); err != nil {
+			return nil, err
+		}
+	}
+	if u.Metadata != nil {
+		if ms := metadataEntries(u.Metadata); len(ms) > 0 {
+			entries = append(entries, ms...)
+			if reason == "" {
+				reason = "metadata: " + ms[0].(map[string]any)["msg"].(string)
+			}
+		}
+		if err := member("metadata", u.Metadata); err != nil {
+			return nil, err
+		}
+	}
+	if buf.Len() == 1 {
+		entries = append(entries, map[string]any{"type": "missing", "loc": []any{"body"}, "msg": "Send reference, label, metadata or any of them", "input": nil})
+		reason = "send reference, label, metadata or any of them"
+	}
+	if len(entries) > 0 {
+		return nil, localValidation(reason, entries...)
+	}
+	buf.WriteByte('}')
+	key, err := newIdempotencyKey()
+	if err != nil {
+		return nil, err
+	}
+	path := collectionPath(collectionID) + "/items/" + url.PathEscape(itemID)
+	resp, err := s.c.call(ctx, http.MethodPatch, path, buf.Bytes(), callOptions{policy: retryIdempotent, idempotencyKey: key})
+	if err != nil {
+		return nil, err
+	}
+	item, err := parseItem(resp.data)
+	if err != nil {
+		return nil, invalidResponse(resp, err)
+	}
+	return item, nil
+}
+
 // ListItems reads one page of a collection's items, newest first, with GET
 // /v1/collections/{id}/items. A public collection's items are not listed: a
 // *PermissionDeniedError with ErrorType collection_read_only.
@@ -332,6 +463,26 @@ func (s *CollectionService) ListItems(ctx context.Context, collectionID string, 
 	query, err := pageQuery(opts.Offset, opts.Limit)
 	if err != nil {
 		return nil, err
+	}
+	if opts.Reference != nil && opts.ReferencePrefix != nil {
+		return nil, usageError("Send query parameter reference or reference_prefix, not both.")
+	}
+	for _, f := range []struct {
+		name  string
+		value *string
+	}{{"reference", opts.Reference}, {"reference_prefix", opts.ReferencePrefix}} {
+		if f.value == nil {
+			continue
+		}
+		if !itemReference.MatchString(*f.value) {
+			return nil, usageError(fmt.Sprintf("Query parameter %s must be 1 to 64 characters of A-Z, a-z, 0-9, _, ., : and -, got %s.", f.name, printable(*f.value, 64)))
+		}
+		if query == "" {
+			query = "?"
+		} else {
+			query += "&"
+		}
+		query += f.name + "=" + url.QueryEscape(*f.value)
 	}
 	resp, err := s.c.doPayload(ctx, http.MethodGet, collectionPath(collectionID)+"/items"+query, nil)
 	if err != nil {
@@ -347,9 +498,19 @@ func (s *CollectionService) ListItems(ctx context.Context, collectionID string, 
 		Limit      int               `json:"limit"`
 		Total      int               `json:"total"`
 		NextOffset *int              `json:"next_offset"`
+		Capped     bool              `json:"total_capped"`
+		Reference  *string           `json:"reference"`
+		Prefix     *string           `json:"reference_prefix"`
 	}
 	_ = json.Unmarshal(resp.data, &shape)
-	page := &CollectionItemPage{Items: []CollectionItem{}, Offset: shape.Offset, Limit: shape.Limit, Total: shape.Total, NextOffset: shape.NextOffset, Raw: raw}
+	page := &CollectionItemPage{Items: []CollectionItem{}, Offset: shape.Offset, Limit: shape.Limit, Total: shape.Total, NextOffset: shape.NextOffset,
+		TotalCapped: shape.Capped, Raw: raw}
+	if shape.Reference != nil {
+		page.Reference = *shape.Reference
+	}
+	if shape.Prefix != nil {
+		page.ReferencePrefix = *shape.Prefix
+	}
 	for _, data := range shape.Items {
 		item, err := parseItem(data)
 		if err != nil {
@@ -498,9 +659,10 @@ func parseItem(data []byte) (*CollectionItem, error) {
 		FacesFound int              `json:"faces_found"`
 		CreatedAt  *string          `json:"created_at"`
 		Usage      *EnrollmentUsage `json:"usage"`
+		Metadata   map[string]any   `json:"metadata"`
 	}
 	_ = json.Unmarshal(data, &shape)
-	item := &CollectionItem{ID: shape.ID, Collection: shape.Collection, Reference: shape.Reference, FacesFound: shape.FacesFound, Usage: shape.Usage, Raw: raw}
+	item := &CollectionItem{ID: shape.ID, Collection: shape.Collection, Reference: shape.Reference, FacesFound: shape.FacesFound, Usage: shape.Usage, Metadata: shape.Metadata, Raw: raw}
 	if shape.Label != nil {
 		item.Label = *shape.Label
 	}
@@ -511,4 +673,105 @@ func parseItem(data []byte) (*CollectionItem, error) {
 		item.Box = &box
 	}
 	return item, nil
+}
+
+// The limits of an item's metadata, checked locally before any request.
+const (
+	// MaxMetadataKeys is the most keys an item's metadata may hold.
+	MaxMetadataKeys = 20
+	// MaxMetadataKeyChars is the longest a metadata key may be.
+	MaxMetadataKeyChars = 40
+	// MaxMetadataTextChars is the longest a metadata text may be.
+	MaxMetadataTextChars = 500
+)
+
+var metadataKey = regexp.MustCompile(`^[a-z0-9_]{1,40}$`)
+
+// metadataEntries are the API's 422 entries for an item's metadata: more
+// than MaxMetadataKeys keys (that alone), then, in key order, each key not of
+// the pattern, each text over MaxMetadataTextChars and each value that is
+// neither a text, a number nor a boolean. A text's control characters, a
+// number's range and the whole object's size are the server's to judge.
+func metadataEntries(m map[string]any) []any {
+	loc := []any{"body", "metadata"}
+	entry := func(loc []any, msg string, input any) map[string]any {
+		return map[string]any{"type": "value_error", "loc": loc, "msg": msg, "input": input}
+	}
+	if len(m) > MaxMetadataKeys {
+		return []any{entry(loc, fmt.Sprintf("Metadata holds at most %d keys.", MaxMetadataKeys), nil)}
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var out []any
+	for _, k := range keys {
+		if !metadataKey.MatchString(k) {
+			out = append(out, entry(loc, fmt.Sprintf(`A metadata key is 1 to %d characters of a-z, 0-9 and _: "%s".`, MaxMetadataKeyChars, shownKey(k)), nil))
+			continue
+		}
+		switch v := m[k].(type) {
+		case string:
+			if utf8.RuneCountInString(v) > MaxMetadataTextChars {
+				out = append(out, entry(append(append([]any(nil), loc...), k), fmt.Sprintf("A metadata text is at most %d characters.", MaxMetadataTextChars), echoed(v)))
+			}
+		case bool, json.Number, float32, float64, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		default:
+			out = append(out, entry(append(append([]any(nil), loc...), k), "A metadata value is a text, a number or true or false.", echoedValue(v)))
+		}
+	}
+	return out
+}
+
+// shownKey is a metadata key as the API's message shows it: its first 40
+// characters, a control character as "?", then "..." when it was longer.
+func shownKey(k string) string {
+	r := []rune(k)
+	more := len(r) > MaxMetadataKeyChars
+	if more {
+		r = r[:MaxMetadataKeyChars]
+	}
+	for i, c := range r {
+		if unicode.IsControl(c) {
+			r[i] = '?'
+		}
+	}
+	if more {
+		return string(r) + "..."
+	}
+	return string(r)
+}
+
+// echoedValue is any input as a collections 422 entry echoes it: a string
+// as echoed, an object or an array as null, anything else as it is.
+func echoedValue(v any) any {
+	switch x := v.(type) {
+	case string:
+		return echoed(x)
+	case map[string]any, []any:
+		return nil
+	}
+	return v
+}
+
+// printable is a caller's value as an API message echoes it: its first
+// most characters, any but printable ASCII as \u{hex}, then "..." when it
+// was longer.
+func printable(v string, most int) string {
+	var b strings.Builder
+	n := 0
+	for _, c := range v {
+		if n == most {
+			b.WriteString("...")
+			break
+		}
+		if c >= 0x20 && c <= 0x7e {
+			b.WriteRune(c)
+		} else {
+			fmt.Fprintf(&b, "\\u{%x}", c)
+		}
+		n++
+	}
+	return b.String()
 }

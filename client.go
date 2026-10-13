@@ -1012,6 +1012,11 @@ func retryable(err error, policy retryPolicy) bool {
 	}
 	var e *Error
 	if errors.As(err, &e) {
+		// An enrollment the deployment has no price for is refused the same
+		// way however often it is sent.
+		if e.Status == 529 && e.Details["reason"] == "enrollment_unpriced" {
+			return false
+		}
 		if policy == retryMutation {
 			return e.Status == 429 || e.Status == 529
 		}
