@@ -289,6 +289,11 @@ type FaceMatch struct {
 	Reference  string
 	Name       string
 	Label      string
+	// CollectionName is an own collection's display name or its id, or a
+	// public collection's id; "" when not sent.
+	CollectionName string
+	// Metadata is an own item's metadata as sent; nil when not sent.
+	Metadata map[string]any
 }
 
 // FaceRecognitionReading is the face_recognition booster's reading of one
@@ -297,9 +302,12 @@ type FaceMatch struct {
 type FaceRecognitionReading struct {
 	readingBase
 	// Image is the id of the image read.
-	Image   string
-	Faces   int
-	Matches []FaceMatch
+	Image string
+	// CollectionName is an own collection's display name; "" when not sent
+	// (a public collection).
+	CollectionName string
+	Faces          int
+	Matches        []FaceMatch
 }
 
 // OCRReading is the ocr booster's reading of one picture: the text it shows,
@@ -477,7 +485,11 @@ func parseReading(booster string, v any) Reading {
 		if !ok || faces < 0 || !isList {
 			return unknown
 		}
-		r := &FaceRecognitionReading{readingBase: base, Image: image, Faces: faces, Matches: []FaceMatch{}}
+		colName, okColName := optionalString(raw["collection_name"])
+		if !okColName {
+			return unknown
+		}
+		r := &FaceRecognitionReading{readingBase: base, Image: image, CollectionName: colName, Faces: faces, Matches: []FaceMatch{}}
 		for _, x := range list {
 			m, _ := x.(map[string]any)
 			box, okBox := faceBox(m["box"])
@@ -486,10 +498,16 @@ func parseReading(booster string, v any) Reading {
 			ref, okRef := m["reference"].(string)
 			name, okName := optionalString(m["name"])
 			label, okLabel := optionalString(m["label"])
-			if !okBox || !okScore || !okCollection || !okRef || !okName || !okLabel {
+			matchColName, okMatchColName := optionalString(m["collection_name"])
+			metadata, okMetadata := m["metadata"].(map[string]any)
+			if m["metadata"] == nil {
+				okMetadata = true
+			}
+			if !okBox || !okScore || !okCollection || !okRef || !okName || !okLabel || !okMatchColName || !okMetadata {
 				return unknown
 			}
-			r.Matches = append(r.Matches, FaceMatch{Box: box, Score: score, Collection: collection, Reference: ref, Name: name, Label: label})
+			r.Matches = append(r.Matches, FaceMatch{Box: box, Score: score, Collection: collection, Reference: ref, Name: name, Label: label,
+				CollectionName: matchColName, Metadata: metadata})
 		}
 		return r
 	case BoosterOCR:

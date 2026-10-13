@@ -508,9 +508,10 @@ func normReading(r dn.Reading) any {
 		matches := []any{}
 		for _, m := range x.Matches {
 			matches = append(matches, map[string]any{"box": normBox(m.Box), "score": m.Score, "collection": m.Collection,
-				"reference": m.Reference, "name": nilIfEmpty(m.Name), "label": nilIfEmpty(m.Label)})
+				"reference": m.Reference, "name": nilIfEmpty(m.Name), "label": nilIfEmpty(m.Label),
+				"collection_name": nilIfEmpty(m.CollectionName), "metadata": m.Metadata})
 		}
-		return map[string]any{"kind": "face_recognition", "image": x.Image, "faces": x.Faces, "matches": matches}
+		return map[string]any{"kind": "face_recognition", "image": x.Image, "collection_name": nilIfEmpty(x.CollectionName), "faces": x.Faces, "matches": matches}
 	case *dn.OCRReading:
 		return map[string]any{"kind": "ocr", "image": x.Image, "text": x.Text, "truncated": x.Truncated}
 	}

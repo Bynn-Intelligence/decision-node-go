@@ -649,3 +649,31 @@ func TestOCRNotRetriedAfterTimeout(t *testing.T) {
 		t.Fatal(dn.OCRTimeout)
 	}
 }
+
+// The reading names its collection and a match carries its item's metadata;
+// either of the wrong type makes the reading generic.
+func TestFaceRecognitionCollectionNameAndMetadata(t *testing.T) {
+	body := `{"model":"m","answers":{},"evidence":{"face_recognition":{"status":"ok","results":[` +
+		`{"image":"gate","collection_name":"Staff","faces":1,"matches":[{"box":{"x1":1,"y1":2,"x2":3,"y2":4},"score":0.9,"collection":"col_1","collection_name":"Staff","reference":"employee-1042","metadata":{"site":"north","floor":3}}]},` +
+		`{"image":"gate","faces":1,"matches":[{"box":{"x1":1,"y1":2,"x2":3,"y2":4},"score":0.9,"collection":"celebrities","reference":"celeb-1"}]},` +
+		`{"image":"gate","collection_name":7,"faces":0,"matches":[]},` +
+		`{"image":"gate","faces":1,"matches":[{"box":{"x1":1,"y1":2,"x2":3,"y2":4},"score":0.9,"collection":"c","reference":"r","metadata":["x"]}]}]}}}`
+	srv, _ := server(t, func(w http.ResponseWriter, r *http.Request, n int) { respond(w, 200, body, nil) })
+	d, err := client(t, srv.URL).Decide(context.Background(), dn.Request{Questions: oneTruth()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs := d.Evidence.Get("face_recognition").Results
+	own, ok := rs[0].(*dn.FaceRecognitionReading)
+	if !ok || own.CollectionName != "Staff" || own.Matches[0].CollectionName != "Staff" || own.Matches[0].Metadata["site"] != "north" {
+		t.Fatalf("own: %#v", rs[0])
+	}
+	if pub, ok := rs[1].(*dn.FaceRecognitionReading); !ok || pub.CollectionName != "" || pub.Matches[0].Metadata != nil {
+		t.Fatalf("public: %#v", rs[1])
+	}
+	for _, r := range rs[2:] {
+		if _, ok := r.(*dn.UnknownReading); !ok {
+			t.Fatalf("malformed: %#v", r)
+		}
+	}
+}
