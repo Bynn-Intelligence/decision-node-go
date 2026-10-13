@@ -584,7 +584,7 @@ func TestFaceReadings(t *testing.T) {
 		`{"image":"gate","faces":1,"detections":[{"box":{"x1":1,"y1":2,"x2":3},"confidence":0.5}]},{"image":"gate","faces":1}]},` +
 		`"face_recognition":{"status":"ok","results":[{"image":"gate","faces":2,"matches":[` +
 		`{"box":{"x1":412,"y1":188,"x2":486,"y2":274},"score":0.93,"collection":"celebrities","reference":"celeb-00412","name":"A Public Figure"},` +
-		`{"box":{"x1":5,"y1":6,"x2":7,"y2":8},"score":0.81,"collection":"wanted-persons","reference":"wanted:2024-12345"}]},` +
+		`{"box":{"x1":5,"y1":6,"x2":7,"y2":8},"score":0.81,"collection":"col_3f6c1a9e0b2d4c7f8a1e5d9b2c4f6a80","reference":"employee-1042"}]},` +
 		`{"image":"gate","faces":1,"matches":[{"box":{"x1":1,"y1":2,"x2":3,"y2":4},"score":0.9,"collection":"celebrities","reference":192}]},` +
 		`{"image":"gate","faces":1,"matches":[{"box":{"x1":1,"y1":2,"x2":3,"y2":4},"score":0.9,"reference":"r"}]},` +
 		`{"image":"gate","faces":1,"matches":[{"box":{"x1":1,"y1":2,"x2":3,"y2":4},"score":0.9,"collection":"c","reference":"r","label":7}]}]}}}`
@@ -606,7 +606,7 @@ func TestFaceReadings(t *testing.T) {
 	found := d.Evidence.Get("face_recognition").Results
 	fr, ok := found[0].(*dn.FaceRecognitionReading)
 	if !ok || fr.Faces != 2 || len(fr.Matches) != 2 || fr.Matches[0].Name != "A Public Figure" || fr.Matches[0].Label != "" ||
-		fr.Matches[0].Box.Y2 != 274 || fr.Matches[1].Reference != "wanted:2024-12345" || fr.Matches[1].Name != "" || fr.Matches[1].Collection != "wanted-persons" {
+		fr.Matches[0].Box.Y2 != 274 || fr.Matches[1].Reference != "employee-1042" || fr.Matches[1].Name != "" || fr.Matches[1].Collection != "col_3f6c1a9e0b2d4c7f8a1e5d9b2c4f6a80" {
 		t.Fatalf("face recognition: %#v", found[0])
 	}
 	for _, r := range found[1:] {
