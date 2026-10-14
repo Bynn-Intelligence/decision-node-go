@@ -1,7 +1,7 @@
 package decisionnode
 
 // Version is the version of this package.
-const Version = "0.4.1"
+const Version = "0.4.2"
 
 // SpecVersion is the version of the DecisionNode SDK surface this package
 // implements.
