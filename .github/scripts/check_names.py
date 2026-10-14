@@ -54,8 +54,9 @@ PLAIN = [
 ]
 # Boosters a README or the package's description may name only once production serves
 # them, and the files that carry one: a README, a wheel's METADATA or an sdist's
-# PKG-INFO, an npm package.json, a gem's metadata.
-UNSERVED = re.compile(r"face_detectio[n]|face_recognitio[n]|wanted_perso[n]", re.I)
+# PKG-INFO, an npm package.json, a gem's metadata. face_detection and face_recognition
+# are served; wanted_person is not.
+UNSERVED = re.compile(r"wanted_perso[n]", re.I)
 DESCRIBES = re.compile(r"(^|/)(README[^/]*|PKG-INFO|METADATA|package\.json|metadata)$", re.I)
 
 TAR = re.compile(r"\.(tar|tar\.gz|tgz|crate|gem)$", re.I)
