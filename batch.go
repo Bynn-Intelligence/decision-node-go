@@ -43,7 +43,10 @@ type BatchRequest struct {
 	Request
 }
 
-// Batch is a batch object: every field the API sends.
+// Batch is a batch object: every field the API sends. It states no price:
+// the batch price is each model's BatchPriceFactor in Models() (MoE 0.7,
+// Flash 0.5, none on a fine-tuned model), and each line's charge is in its
+// usage.
 type Batch struct {
 	// ID is "batch_" and 10 characters.
 	ID string
@@ -58,7 +61,6 @@ type Batch struct {
 	EndedAt         string
 	ResultsURL      string
 	ResultsExpireAt string
-	PriceFactor     float64
 	Usage           Usage
 	// Error is set when the batch failed.
 	Error *BatchError
@@ -613,7 +615,6 @@ func parseBatch(data []byte) (*Batch, error) {
 		EndedAt         *string       `json:"ended_at"`
 		ResultsURL      *string       `json:"results_url"`
 		ResultsExpireAt *string       `json:"results_expire_at"`
-		PriceFactor     float64       `json:"price_factor"`
 		Usage           Usage         `json:"usage"`
 		Error           *BatchError   `json:"error"`
 	}
@@ -628,7 +629,7 @@ func parseBatch(data []byte) (*Batch, error) {
 	return &Batch{
 		ID: shape.ID, State: shape.State, Counters: shape.Counters, CreatedAt: str(shape.CreatedAt),
 		FinalizedAt: str(shape.FinalizedAt), ExpiresAt: str(shape.ExpiresAt), EndedAt: str(shape.EndedAt),
-		ResultsURL: str(shape.ResultsURL), ResultsExpireAt: str(shape.ResultsExpireAt), PriceFactor: shape.PriceFactor,
+		ResultsURL: str(shape.ResultsURL), ResultsExpireAt: str(shape.ResultsExpireAt),
 		Usage: shape.Usage, Error: shape.Error, Raw: raw,
 	}, nil
 }

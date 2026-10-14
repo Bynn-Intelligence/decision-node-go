@@ -677,3 +677,24 @@ func TestFaceRecognitionCollectionNameAndMetadata(t *testing.T) {
 		}
 	}
 }
+
+// A model entry's prices are typed as sent; a fine-tuned entry has no batch
+// factor, and the batch object states no price.
+func TestModelPrices(t *testing.T) {
+	srv, _ := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		respond(w, 200, `{"models":[`+
+			`{"name":"decisionnode-moe","price_per_million_input":0.042,"price_per_million_output":0,"price_per_million_image":0.09,"price_per_million_video":0.09,"batch_price_factor":0.7},`+
+			`{"name":"decisionnode-flash@acme/triage","price_per_million_input":0.055,"fine_tuned":true}]}`, nil)
+	})
+	models, err := client(t, srv.URL).Models(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	moe, tuned := models[0], models[1]
+	if *moe.PricePerMillionInput != 0.042 || *moe.PricePerMillionOutput != 0 || *moe.PricePerMillionImage != 0.09 || *moe.PricePerMillionVideo != 0.09 || *moe.BatchPriceFactor != 0.7 {
+		t.Fatalf("moe: %+v", moe)
+	}
+	if *tuned.PricePerMillionInput != 0.055 || tuned.PricePerMillionImage != nil || tuned.BatchPriceFactor != nil {
+		t.Fatalf("fine-tuned: %+v", tuned)
+	}
+}

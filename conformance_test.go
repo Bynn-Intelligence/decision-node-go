@@ -380,6 +380,13 @@ func match(expected, actual any, path string) error {
 		sort.Strings(keys)
 		for _, k := range keys {
 			av, ok := am[k]
+			if isAbsent(em[k]) {
+				// Suite 1.17: the key must not be there at all.
+				if ok {
+					return fmt.Errorf("%s.%s: expected no such key, got %s", path, k, short(av))
+				}
+				continue
+			}
 			if !ok {
 				return fmt.Errorf("%s.%s: missing (expected %s)", path, k, short(em[k]))
 			}
@@ -397,6 +404,12 @@ func match(expected, actual any, path string) error {
 		return fmt.Errorf("%s: expected %s, got %s", path, short(expected), short(actual))
 	}
 	return nil
+}
+
+// isAbsent is the expectation {"$absent": true}.
+func isAbsent(v any) bool {
+	m, ok := v.(map[string]any)
+	return ok && len(m) == 1 && m["$absent"] == true
 }
 
 // canon passes a value through JSON so it holds only the shapes same knows.
@@ -1949,7 +1962,6 @@ func normBatch(b *dn.Batch) any {
 		"ended_at":          nilIfZero(b.EndedAt),
 		"results_url":       nilIfZero(b.ResultsURL),
 		"results_expire_at": nilIfZero(b.ResultsExpireAt),
-		"price_factor":      b.PriceFactor,
 		"usage":             map[string]any{"input_tokens": intOrNil(b.Usage.InputTokens), "output_tokens": intOrNil(b.Usage.OutputTokens)},
 		"error":             errVal,
 	})

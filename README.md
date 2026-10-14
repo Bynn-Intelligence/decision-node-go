@@ -139,7 +139,7 @@ Numbers are passed through exactly as received: a probability list may read 0.82
 | `Supervise(ctx, body, feed, onEvent)` | Keeps a feed of frames answered across sessions, reopening as needed. |
 | `Batches()` | The Batch API: `Create`, `Add`, `Finalize`, `Get`, `List`, `Results`, `Cancel`; see [Batches](#batches). |
 | `RunBatch(ctx, requests, dn.RunBatchOptions)` | A batch from start to results in one call. |
-| `Models(ctx)` | The models your key can use, with their published limits, as `[]dn.ModelInfo`. The session, batch, number and upload limits are also typed fields (`Sessions`, `Batch`, `NumberMaxGridValues`, ...), and your workspace's fine-tuned models are listed beside the catalogue's (see [Fine-tuned models](#fine-tuned-models)). |
+| `Models(ctx)` | The models your key can use, with their published limits, as `[]dn.ModelInfo`. The session, batch, number and upload limits and the prices are also typed fields (`Sessions`, `Batch`, `NumberMaxGridValues`, `PricePerMillionInput`, `BatchPriceFactor`, ...), and your workspace's fine-tuned models are listed beside the catalogue's (see [Fine-tuned models](#fine-tuned-models)). |
 | `DecideRaw(ctx, body)` | Sends a body exactly as given and returns the parsed response. For API fields this version does not know yet. |
 
 `Check`, `Classify`, `Score`, `Number` and `Gate` take `Images`, `Videos`, `Model`, `Boosters` and `Fallback` like `Decide`. `Check`, `Classify`, `Score` and `Number` promise a typed answer, so when their own answer is missing or malformed they return a `*ServerError` with the response's status, `RequestID` and `Reason`. `Decide` returns such an answer as an `*UnknownAnswer` instead.
@@ -360,7 +360,7 @@ for ev := range s.Replies() {
 
 ## Batches
 
-The Batch API answers many decide requests asynchronously, for less than live calls: Flash 50% off the live price, DecisionNode MoE 30% off. There is no set time at which a batch finishes, so poll for it; a request not answered 24 hours after the batch is finalized expires and is not billed. `RunBatch` does the whole lifecycle:
+The Batch API answers many decide requests asynchronously, for less than live calls: Flash 50% off the live price, DecisionNode MoE 30% off. There is no set time at which a batch finishes, so poll for it; a request not answered 24 hours after the batch is finalized expires and is not billed. Each model's batch price is its `BatchPriceFactor` in `Models(ctx)` (none on a fine-tuned model), and each result line's charge is in its usage. `RunBatch` does the whole lifecycle:
 
 ```go
 batch, results, err := client.RunBatch(ctx, []dn.BatchRequest{

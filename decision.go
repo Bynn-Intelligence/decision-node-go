@@ -379,6 +379,16 @@ type ModelInfo struct {
 	// deployed), or any other value exactly as sent.
 	Status string
 
+	// The model's prices in USD per million tokens, as sent: input (text),
+	// output, image and video tokens.
+	PricePerMillionInput  *float64
+	PricePerMillionOutput *float64
+	PricePerMillionImage  *float64
+	PricePerMillionVideo  *float64
+	// BatchPriceFactor is the share of the live prices a batch line pays
+	// (MoE 0.7, Flash 0.5); nil on a fine-tuned model.
+	BatchPriceFactor *float64
+
 	// NumberOneQuestionValues is the most grid values answered as one question.
 	NumberOneQuestionValues *int
 	// NumberMaxGridValues is the most values a number grid may hold.
@@ -416,16 +426,14 @@ type ModelSessions struct {
 
 // ModelBatch is the batch object of a model entry.
 type ModelBatch struct {
-	RequestsPerBatch           int     `json:"requests_per_batch"`
-	BatchBytes                 int64   `json:"batch_bytes"`
-	AddBytes                   int64   `json:"add_bytes"`
-	ActiveBatchesPerKey        int     `json:"active_batches_per_key"`
-	QueuedRequestsPerKey       int     `json:"queued_requests_per_key"`
-	TimeToCompletionHours      int     `json:"time_to_completion_hours"`
-	ResultRetentionDays        int     `json:"result_retention_days"`
-	MaxCustomIDChars           int     `json:"max_custom_id_chars"`
-	PricePerMillionInputTokens float64 `json:"price_per_million_input_tokens"`
-	PriceFactor                float64 `json:"price_factor"`
+	RequestsPerBatch      int   `json:"requests_per_batch"`
+	BatchBytes            int64 `json:"batch_bytes"`
+	AddBytes              int64 `json:"add_bytes"`
+	ActiveBatchesPerKey   int   `json:"active_batches_per_key"`
+	QueuedRequestsPerKey  int   `json:"queued_requests_per_key"`
+	TimeToCompletionHours int   `json:"time_to_completion_hours"`
+	ResultRetentionDays   int   `json:"result_retention_days"`
+	MaxCustomIDChars      int   `json:"max_custom_id_chars"`
 }
 
 func parseDecision(body []byte, header http.Header) (*Decision, error) {
@@ -642,6 +650,11 @@ func parseModels(body []byte) ([]ModelInfo, error) {
 		m.Base, _ = entry["base"].(string)
 		m.AdapterVersion = intField(entry, "adapter_version")
 		m.Status, _ = entry["status"].(string)
+		m.PricePerMillionInput = floatField(entry, "price_per_million_input")
+		m.PricePerMillionOutput = floatField(entry, "price_per_million_output")
+		m.PricePerMillionImage = floatField(entry, "price_per_million_image")
+		m.PricePerMillionVideo = floatField(entry, "price_per_million_video")
+		m.BatchPriceFactor = floatField(entry, "batch_price_factor")
 		m.NumberOneQuestionValues = intField(entry, "number_one_question_values")
 		m.NumberMaxGridValues = intField(entry, "number_max_grid_values")
 		if r, ok := entry["number_default_range"].([]any); ok {
@@ -686,6 +699,14 @@ func intField(m map[string]any, key string) *int {
 	}
 	n := int(f)
 	return &n
+}
+
+func floatField(m map[string]any, key string) *float64 {
+	f, ok := m[key].(float64)
+	if !ok {
+		return nil
+	}
+	return &f
 }
 
 // remarshal fills a typed struct from a parsed object, ignoring fields of
