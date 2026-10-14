@@ -5,7 +5,7 @@
 The Go client for the [DecisionNode](https://decisionnode.com) API: ask structured questions about any state and get calibrated numbers back.
 
 - Six question types: `truth` (how likely a statement is true), `choice` (one option of a set), `score` (a place on an ordered scale), `number` (a value on a grid you define), `point` (a spot in an image) and `box` (a rectangle in an image).
-- Decisions one at a time, many at once, as a live session over a WebSocket, or as a batch at half the price.
+- Decisions one at a time, many at once, as a live session over a WebSocket, or as a batch for less (Flash 50% off the live price, DecisionNode MoE 30% off).
 - Up to 16 images by URL, from files or from bytes, checked locally and uploaded only when that is faster.
 - Videos sent as the frames you sampled, each with its time.
 - Boosters: specialist readings of your images (an age, whether a picture was AI-generated) added to a decision as evidence.
@@ -360,7 +360,7 @@ for ev := range s.Replies() {
 
 ## Batches
 
-The Batch API answers many decide requests asynchronously, within 24 hours, at half the price. `RunBatch` does the whole lifecycle:
+The Batch API answers many decide requests asynchronously, for less than live calls: Flash 50% off the live price, DecisionNode MoE 30% off. There is no set time at which a batch finishes, so poll for it; a request not answered 24 hours after the batch is finalized expires and is not billed. `RunBatch` does the whole lifecycle:
 
 ```go
 batch, results, err := client.RunBatch(ctx, []dn.BatchRequest{

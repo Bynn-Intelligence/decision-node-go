@@ -130,9 +130,10 @@ type BatchResult struct {
 	RawJSON json.RawMessage
 }
 
-// BatchService is the Batch API: decide requests run asynchronously at
-// half the price, ended within 24 hours of finalize. Get it from
-// Client.Batches.
+// BatchService is the Batch API: decide requests run asynchronously for
+// less than live calls (Flash 50% off the live price, DecisionNode MoE 30%
+// off), with no set time to finish; a request not answered 24 hours after
+// finalize expires and is not billed. Get it from Client.Batches.
 type BatchService struct{ c *Client }
 
 // Batches returns the client's Batch API.

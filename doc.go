@@ -11,7 +11,7 @@
 //
 // Decisions are made one at a time (Decide), many at once
 // (DecideMany), as a live stream of frames over a WebSocket (OpenSession,
-// Supervise), or asynchronously at half the price (Batches, RunBatch).
+// Supervise), or asynchronously as a batch, for less (Batches, RunBatch).
 // Images are best sent by URL (ImageURL); local images are checked before any
 // request and go inline when small or are uploaded once when large. Videos
 // travel as the frames the caller sampled, each with its time (Video,
