@@ -139,6 +139,8 @@ Numbers are passed through exactly as received: a probability list may read 0.82
 | `Supervise(ctx, body, feed, onEvent)` | Keeps a feed of frames answered across sessions, reopening as needed. |
 | `Batches()` | The Batch API: `Create`, `Add`, `Finalize`, `Get`, `List`, `Results`, `Cancel`; see [Batches](#batches). |
 | `RunBatch(ctx, requests, dn.RunBatchOptions)` | A batch from start to results in one call. |
+| `Usage()` | Each key's usage and cost for a period: `Key`, `List`, `All`; see [Per-key usage](#per-key-usage). |
+| `Keys()` | Decisions-only keys for your devices: `Create`, `List`, `All`, `Update`, `Revoke`, `RevokeByLabels`; see [Keys for devices](#keys-for-devices). |
 | `Models(ctx)` | The models your key can use, with their published limits, as `[]dn.ModelInfo`. The session, batch, number and upload limits and the prices are also typed fields (`Sessions`, `Batch`, `NumberMaxGridValues`, `PricePerMillionInput`, `BatchPriceFactor`, ...), and your workspace's fine-tuned models are listed beside the catalogue's (see [Fine-tuned models](#fine-tuned-models)). |
 | `DecideRaw(ctx, body)` | Sends a body exactly as given and returns the parsed response. For API fields this version does not know yet. |
 
@@ -412,6 +414,48 @@ item, err = client.Collections().UpdateItem(ctx, col.ID, item.ID, dn.ItemUpdate{
 - `ListItems` pages with `Offset` and `Limit`, and finds the items of one `Reference` or of a `ReferencePrefix`; the page carries `TotalCapped`, `Reference` and `ReferencePrefix` as sent.
 - Checked locally, with the API's entries: a name of 1 to 80 characters, a reference of 1 to 64 of `A-Z a-z 0-9 _ . : -`, a label of 1 to 128 characters, and metadata of at most 20 keys of 1 to 40 of `a-z 0-9 _`, each value a text of at most 500 characters, a number, or true or false. An enrolled image's URL is checked as a decision's.
 
+## Per-key usage
+
+Every call is metered on the key that made it. `client.Usage()` reads each key's requests, tokens and cost for a period, by hour, day or month and by model or channel, revoked and expired keys included. A Full access key reads every key of the workspace; a Manage device keys key reads the Decisions-only keys.
+
+```go
+one, err := client.Usage().Key(ctx, "key_7c2e9a41b0d34f6e8a5c1d2b3e4f5a60", dn.UsageOptions{Granularity: "day"})
+fmt.Println(one.Totals.Requests, one.Totals.Cost.USD)
+
+items, err := client.Usage().All(ctx, dn.UsageListOptions{
+	Start:  "2026-09-01T00:00:00Z",
+	End:    "2026-10-01T00:00:00Z",
+	Labels: map[string]string{"customer": "acme"},
+})
+```
+
+- `Key` reads one key; without `Start` and `End` the server reads the UTC month so far. `List` reads one page of keys (`Start` and `End` required), filtered by `Labels`, `DeviceID`, `KeyIDs` (at most 100), `Scope` and `Status`, with `IncludeEmpty`, `Limit` and `Cursor`; `All` follows `NextCursor` until the last page, since a page can hold fewer keys than `Limit`.
+- Each result carries its fields typed (`Key`, `Period`, `AsOf`, `Totals`, `Buckets`, `ByModel`, `ByChannel`) and `Raw` as sent. `AsOf` says how far the figures are complete; they are final once it equals `Period.End`.
+- Checked locally, with the API's messages, as a `*BadRequestError` (`api_usage_error`): `Granularity` (`none`, `hour`, `day`, `month`), `GroupBy` (`model`, `channel`), each label, `DeviceID`, each key id, `Scope`, `Status` and `Limit` (1 to 1,000). The period's own rules are the server's.
+
+## Keys for devices
+
+A Manage device keys key, made in the console and kept on your provisioning server, makes a Decisions-only key for each device through `client.Keys()`, with its own limits, daily spend cap and expiry, and revokes one device or a whole group by label:
+
+```go
+provisioner := dn.NewClient(dn.WithAPIKey(os.Getenv("DECISIONNODE_MANAGE_KEY")))
+created, err := provisioner.Keys().Create(ctx, dn.KeyCreate{
+	Name:             "Kiosk 0412",
+	DeviceID:         "kiosk-0412",
+	Labels:           map[string]string{"store": "118"},
+	DailySpendCapUSD: dn.Ptr(2.0),
+	IdempotencyKey:   dn.Ptr("enroll-kiosk-0412"), // a retry returns the same key
+})
+// Hand created.Secret to the device once; keep created.Key.ID to change or revoke it.
+
+counted, err := provisioner.Keys().RevokeByLabels(ctx, dn.KeyRevoke{Labels: map[string]string{"store": "118"}, DryRun: true})
+```
+
+- `Create` sends an `Idempotency-Key`, yours or a new UUID for the call, the same on every attempt: a retry within 24 hours returns the same key and its secret, and makes no second key. Printing a `CreatedKey` hides the secret.
+- `List` and `All` find keys by `Labels` (all must match), `DeviceID` and `Status`, which is also how one key is read; `Update` changes the name, labels, limits, spend cap, expiry or the face search flag, sending only what is given (each `Clear` field removes a setting); `Revoke` revokes one key; `RevokeByLabels` revokes a group, at most 10,000 a call: call it again while `More` is true.
+- Checked locally, with the API's own error: a name of 1 to 48 characters once trimmed, a `DeviceID` of 1 to 128 printable ASCII characters, at most 16 labels (each name 1 to 32 of `a-z 0-9 _ . -`, each value 1 to 64 characters), a spend cap of 0.01 to 1,000 USD in whole cents, an `IdempotencyKey` of 1 to 255 printable ASCII characters, an update with nothing to change, a page `Limit` of 1 to 200, and a bulk revoke with no label or over 1,000 devices. A limit's ceiling, the expiry's window and a name's characters are the server's.
+- A key made this way can only make decisions; give it to one device only.
+
 ## Errors
 
 Every error from the API or the network is an `*dn.Error` (also exported as `dn.DecisionNodeError`, the name every DecisionNode SDK uses for its base error) with `Status`, `ErrorType`, `RequestID`, `Reason` (the server's explanation in words, from the `x-decisionnode-error` header) and `Details` (the body's `detail.details` when it is an object, such as `{"reason": "enrollment_unpriced"}`, else nil). `err.Error()` is the server's message exactly as sent, empty when it sent none, or the client's own description when no response arrived. Match the specific types with `errors.As`:
@@ -440,11 +484,12 @@ case errors.As(err, &apiErr):
 | 401 | `*AuthenticationError` | |
 | 402 | `*InsufficientCreditError` | |
 | 403, refusal | `*RefusalError` | `Category` (`harm` or `self_harm`), `Safety` |
-| 403, any other (`booster_not_enabled`, `key_scope_denied`, a suspended workspace) | `*PermissionDeniedError` | |
+| 403, any other (`booster_not_enabled`, `key_scope_denied`, a publishable key's `origin_not_allowed` and `model_not_allowed`, a suspended workspace) | `*PermissionDeniedError` | `Details` (`Details["allowed"]`, the models a publishable key may ask) |
 | 404 | `*NotFoundError` | |
 | 413 | `*RequestTooLargeError`, never retried | |
 | 422 | `*ValidationError` | `Entries` |
-| 429 | `*RateLimitError` | `RetryAfter` (capped at 60 s) |
+| 429 | `*RateLimitError` | `RetryAfter` (capped at 60 s); `Details["reason"]` such as a publishable key's `client_rate` or `in_flight` |
+| 429, `key_spend_cap_reached` | `*RateLimitError`, never retried: the key's daily spend cap resets at 00:00 UTC | `Details` (`resets_at`, `cap`, `spent`) |
 | 429, `session_limit_exceeded` | `*SessionLimitError` (also a `*RateLimitError`), never retried | `RetryAfter` |
 | 529 (also `booster_unavailable`) | `*OverloadedError` | `RetryAfter` (capped at 60 s); never retried when `Details["reason"]` is `enrollment_unpriced` |
 | other 5xx | `*ServerError` | |
@@ -481,7 +526,7 @@ After a call to `Models`, the client also checks the limits only that list state
 
 ## Retries and timeouts
 
-Each attempt has 10 seconds, covering the whole attempt: connecting, sending, and reading the response to its last byte. Requests that fail with 408, 429, any 5xx, a timeout or a connection error are retried twice, waiting as long as the API asks (`retry-after-ms`, else `Retry-After` in seconds or as an HTTP date, at most 60 s) or else backing off exponentially from 0.5 s, with jitter, up to 8 s. 400, 401, 402, 403, 404 and 422 are never retried. A decision changes nothing on the server, so a retry is always safe. An image upload to storage is retried on 5xx and connection errors the same way; a storage `403` after the upload URL's 5 minutes have passed (a slow connection) is presigned again once. Batch `Create`, `Add` and `Finalize` are the exception: they are retried only on 429 and 529, which the API never applies.
+Each attempt has 10 seconds, covering the whole attempt: connecting, sending, and reading the response to its last byte. Requests that fail with 408, 429, any 5xx, a timeout or a connection error are retried twice, waiting as long as the API asks (`retry-after-ms`, else `Retry-After` in seconds or as an HTTP date, at most 60 s) or else backing off exponentially from 0.5 s, with jitter, up to 8 s. 400, 401, 402, 403, 404 and 422 are never retried, nor a 429 `key_spend_cap_reached`, whose cap resets at 00:00 UTC. A decision changes nothing on the server, so a retry is always safe. An image upload to storage is retried on 5xx and connection errors the same way; a storage `403` after the upload URL's 5 minutes have passed (a slow connection) is presigned again once. Batch `Create`, `Add` and `Finalize` are the exception: they are retried only on 429 and 529, which the API never applies.
 
 A request whose boosters name `ocr` has 30 seconds per attempt (`dn.OCRTimeout`) unless you set a timeout with `dn.WithTimeout`, which is then used as given. It is never retried after a timeout, because the server finishes the timed-out attempt and may bill it; its other retries stay. Give such requests a timeout of at least 30 seconds.
 

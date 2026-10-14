@@ -801,6 +801,17 @@ func (r refs) resolve(path string) any {
 			cur = x.Raw[part]
 		case *dn.CollectionItem:
 			cur = x.Raw[part]
+		case *dn.UsagePage:
+			cur = x.Raw[part]
+		case *dn.CreatedKey:
+			cur = x.Raw[part]
+		case *dn.Key:
+			cur = x.Raw[part]
+		case *dn.KeyPage:
+			cur = x.Raw[part]
+		case []dn.Key:
+			i, _ := strconv.Atoi(part)
+			cur = x[i].Raw
 		case []string:
 			i, _ := strconv.Atoi(part)
 			cur = x[i]
@@ -1503,6 +1514,96 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 		return c.Collections().ListItems(ctx, str(plainArg(args.vals["collection_id"], r)), opts)
 	case "collections.delete_item":
 		return c.Collections().DeleteItem(ctx, str(plainArg(args.vals["collection_id"], r)), str(plainArg(args.vals["item_id"], r)))
+	case "usage.key":
+		return c.Usage().Key(ctx, str(plainArg(args.vals["key_id"], r)), dn.UsageOptions{Start: str(args.vals["start"]), End: str(args.vals["end"]),
+			Granularity: str(args.vals["granularity"]), GroupBy: str(args.vals["group_by"])})
+	case "usage.list", "usage.all":
+		opts := dn.UsageListOptions{Start: str(args.vals["start"]), End: str(args.vals["end"]), Granularity: str(args.vals["granularity"]),
+			GroupBy: str(args.vals["group_by"]), DeviceID: str(args.vals["device_id"]), Scope: str(args.vals["scope"]), Status: str(args.vals["status"]),
+			Cursor: str(plainArg(args.vals["cursor"], r))}
+		if l, ok := args.vals["labels"].(*object); ok {
+			opts.Labels = map[string]string{}
+			for _, k := range l.keys {
+				opts.Labels[k] = str(l.vals[k])
+			}
+		}
+		if ids, ok := args.vals["key_ids"].([]any); ok {
+			for _, id := range ids {
+				opts.KeyIDs = append(opts.KeyIDs, str(id))
+			}
+		}
+		if b, ok := args.vals["include_empty"].(bool); ok {
+			opts.IncludeEmpty = &b
+		}
+		if n, ok := args.vals["limit"].(json.Number); ok {
+			i, _ := n.Int64()
+			opts.Limit = dn.Ptr(int(i))
+		}
+		if method == "usage.all" {
+			return c.Usage().All(ctx, opts)
+		}
+		return c.Usage().List(ctx, opts)
+	case "keys.create":
+		k := dn.KeyCreate{Name: str(plainArg(args.vals["name"], r)), DeviceID: str(args.vals["device_id"]), Labels: labelsArg(args.vals["labels"]),
+			Limits: limitsArg(args.vals["limits"]), DailySpendCapUSD: capArg(args.vals["daily_spend_cap"]), ExpiresAt: str(args.vals["expires_at"])}
+		if b, ok := args.vals["may_search_collections"].(bool); ok {
+			k.MaySearchCollections = &b
+		}
+		if v, ok := args.vals["idempotency_key"].(string); ok {
+			k.IdempotencyKey = &v
+		}
+		return c.Keys().Create(ctx, k)
+	case "keys.list", "keys.all":
+		opts := dn.KeyListOptions{Labels: labelsArg(args.vals["labels"]), DeviceID: str(args.vals["device_id"]), Status: str(args.vals["status"]),
+			Cursor: str(plainArg(args.vals["cursor"], r))}
+		if n, ok := args.vals["limit"].(json.Number); ok {
+			i, _ := n.Int64()
+			opts.Limit = dn.Ptr(int(i))
+		}
+		if method == "keys.all" {
+			return c.Keys().All(ctx, opts)
+		}
+		return c.Keys().List(ctx, opts)
+	case "keys.update":
+		var u dn.KeyUpdate
+		if v, ok := get(args, "name"); ok {
+			u.Name = dn.Ptr(str(plainArg(v, r)))
+		}
+		if v, ok := get(args, "labels"); ok {
+			u.Labels, u.ClearLabels = labelsArg(v), v == nil
+		}
+		if v, ok := get(args, "limits"); ok {
+			u.Limits, u.ClearLimits = limitsArg(v), v == nil
+		}
+		if v, ok := get(args, "daily_spend_cap"); ok {
+			u.DailySpendCapUSD, u.ClearDailySpendCap = capArg(v), v == nil
+		}
+		if v, ok := get(args, "expires_at"); ok {
+			if v == nil {
+				u.ClearExpiresAt = true
+			} else {
+				u.ExpiresAt = dn.Ptr(str(v))
+			}
+		}
+		if b, ok := args.vals["may_search_collections"].(bool); ok {
+			u.MaySearchCollections = &b
+		}
+		return c.Keys().Update(ctx, str(plainArg(args.vals["key_id"], r)), u)
+	case "keys.revoke":
+		return c.Keys().Revoke(ctx, str(plainArg(args.vals["key_id"], r)))
+	case "keys.revoke_by_labels":
+		kr := dn.KeyRevoke{Labels: labelsArg(args.vals["labels"])}
+		if kr.Labels == nil {
+			kr.Labels = map[string]string{}
+		}
+		if ids, ok := args.vals["device_ids"].([]any); ok {
+			kr.DeviceIDs = []string{}
+			for _, id := range ids {
+				kr.DeviceIDs = append(kr.DeviceIDs, str(id))
+			}
+		}
+		kr.DryRun, _ = args.vals["dry_run"].(bool)
+		return c.Keys().RevokeByLabels(ctx, kr)
 	case "batches.list":
 		var opts dn.BatchListOptions
 		if n, ok := args.vals["offset"].(json.Number); ok {
@@ -1749,6 +1850,22 @@ func checkRequest(exp *object, got mockRecord, where string, anyBody bool) error
 			return fmt.Errorf("%s query: expected %s, got %s", where, short(want), short(have))
 		}
 	}
+	if q, ok := get(exp, "query_all"); ok {
+		// Suite 1.18: every parameter with all its values, a repeated one in
+		// its order.
+		parsed, _ := url.ParseQuery(got.Query)
+		have := map[string]any{}
+		for k, v := range parsed {
+			vals := make([]any, len(v))
+			for i, x := range v {
+				vals[i] = x
+			}
+			have[k] = vals
+		}
+		if want := plain(q); !same(want, have) {
+			return fmt.Errorf("%s query_all: expected %s, got %s", where, short(want), short(have))
+		}
+	}
 	if st, ok := get(exp, "status"); ok {
 		want, _ := st.(json.Number).Int64()
 		if got.Status == nil || int64(*got.Status) != want {
@@ -1965,6 +2082,130 @@ func normBatch(b *dn.Batch) any {
 		"usage":             map[string]any{"input_tokens": intOrNil(b.Usage.InputTokens), "output_tokens": intOrNil(b.Usage.OutputTokens)},
 		"error":             errVal,
 	})
+}
+
+// checkUsageResult compares a usage read's result, the object as sent;
+// usage_items is the list, compared entry by entry.
+func checkUsageResult(kind string, want, result any, path string) error {
+	if want == nil {
+		// Only the kind is expected.
+		want = map[string]any{}
+		if kind == "usage_items" {
+			if _, ok := result.([]dn.UsageItem); !ok {
+				return fmt.Errorf("%s: expected usage items, got %T", path, result)
+			}
+			return nil
+		}
+	}
+	switch kind {
+	case "key_usage":
+		u, ok := result.(*dn.KeyUsage)
+		if !ok {
+			return fmt.Errorf("%s: expected a key's usage, got %T", path, result)
+		}
+		return match(want, canon(u.Raw), path)
+	case "usage_page":
+		p, ok := result.(*dn.UsagePage)
+		if !ok {
+			return fmt.Errorf("%s: expected a usage page, got %T", path, result)
+		}
+		return match(want, canon(p.Raw), path)
+	}
+	items, ok := result.([]dn.UsageItem)
+	if !ok {
+		return fmt.Errorf("%s: expected usage items, got %T", path, result)
+	}
+	wants, _ := want.([]any)
+	if len(wants) != len(items) {
+		return fmt.Errorf("%s: expected %d items, got %d", path, len(wants), len(items))
+	}
+	for i := range items {
+		if err := match(wants[i], canon(items[i].Raw), fmt.Sprintf("%s[%d]", path, i)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkKeysResult compares a /v1/keys call's result, the object as sent;
+// api_keys is the list, compared entry by entry.
+func checkKeysResult(kind string, want, result any, path string) error {
+	var got any
+	switch x := result.(type) {
+	case *dn.CreatedKey:
+		got = x.Raw
+	case *dn.Key:
+		got = x.Raw
+	case *dn.KeyPage:
+		got = x.Raw
+	case *dn.RevokedKey:
+		got = x.Raw
+	case *dn.KeysRevoked:
+		got = x.Raw
+	case []dn.Key:
+		list := []any{}
+		for _, k := range x {
+			list = append(list, k.Raw)
+		}
+		wants, _ := want.([]any)
+		if want != nil && len(wants) != len(list) {
+			return fmt.Errorf("%s: expected %d keys, got %d", path, len(wants), len(list))
+		}
+		for i := range wants {
+			if err := match(wants[i], canon(list[i]), fmt.Sprintf("%s[%d]", path, i)); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("%s: expected a %s, got %T", path, kind, result)
+	}
+	if want == nil {
+		return nil
+	}
+	return match(want, canon(got), path)
+}
+
+func labelsArg(v any) map[string]string {
+	o, ok := v.(*object)
+	if !ok {
+		return nil
+	}
+	m := map[string]string{}
+	for _, k := range o.keys {
+		m[k] = str(o.vals[k])
+	}
+	return m
+}
+
+func limitsArg(v any) *dn.KeyLimits {
+	o, ok := v.(*object)
+	if !ok {
+		return nil
+	}
+	l := &dn.KeyLimits{}
+	if n, ok := o.vals["requests_per_second"].(json.Number); ok {
+		i, _ := n.Int64()
+		l.RequestsPerSecond = dn.Ptr(int(i))
+	}
+	if n, ok := o.vals["tokens_per_second"].(json.Number); ok {
+		i, _ := n.Int64()
+		l.TokensPerSecond = dn.Ptr(int(i))
+	}
+	return l
+}
+
+func capArg(v any) *float64 {
+	o, ok := v.(*object)
+	if !ok {
+		return nil
+	}
+	n, ok := o.vals["usd"].(json.Number)
+	if !ok {
+		return nil
+	}
+	f, _ := n.Float64()
+	return &f
 }
 
 // collectionKinds are the expectations of the collections calls' results.
@@ -2233,6 +2474,18 @@ func runResponse(t *testing.T, root string, m *mock, c *object) error {
 				return checkCollectionResult(kind, want, result, kind)
 			}
 		}
+	case exp["created_key"] != nil, exp["api_key"] != nil, exp["key_page"] != nil, exp["api_keys"] != nil, exp["key_revoked"] != nil, exp["keys_revoked"] != nil:
+		for _, kind := range []string{"created_key", "api_key", "key_page", "api_keys", "key_revoked", "keys_revoked"} {
+			if want, ok := exp[kind]; ok {
+				return checkKeysResult(kind, want, result, kind)
+			}
+		}
+	case exp["key_usage"] != nil, exp["usage_page"] != nil, exp["usage_items"] != nil:
+		for _, kind := range []string{"key_usage", "usage_page", "usage_items"} {
+			if want, ok := exp[kind]; ok {
+				return checkUsageResult(kind, want, result, kind)
+			}
+		}
 	case exp["batch_results"] != nil:
 		return checkBatchResults(exp["batch_results"].([]any), result.([]dn.BatchResult), "batch_results")
 	case exp["session"] != nil:
@@ -2325,6 +2578,10 @@ func checkOutcome(spec map[string]any, result any, err error, path string) error
 		return checkResultsSpec(spec, rs, path)
 	case "collection", "collections", "item", "item_page", "deleted":
 		return checkCollectionResult(kind, spec[kind], result, path+"."+kind)
+	case "key_usage", "usage_page", "usage_items":
+		return checkUsageResult(kind, spec[kind], result, path+"."+kind)
+	case "created_key", "api_key", "key_page", "api_keys", "key_revoked", "keys_revoked":
+		return checkKeysResult(kind, spec[kind], result, path+"."+kind)
 	case "checked":
 		if result != nil {
 			return fmt.Errorf("%s: a check returned %v", path, result)

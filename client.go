@@ -999,7 +999,7 @@ func (c *Client) log(ctx context.Context, method, path string, status int, reque
 // For a mutation: 429 and 529 only. For a call with its own Idempotency-Key:
 // as by default, and a 409 idempotency_in_progress. A 429
 // session_limit_exceeded never: the count frees when a session ends, not
-// when time passes.
+// when time passes. Nor a 429 key_spend_cap_reached.
 func retryable(err error, policy retryPolicy) bool {
 	var sl *SessionLimitError
 	if errors.As(err, &sl) {
@@ -1015,6 +1015,11 @@ func retryable(err error, policy retryPolicy) bool {
 		// An enrollment the deployment has no price for is refused the same
 		// way however often it is sent.
 		if e.Status == 529 && e.Details["reason"] == "enrollment_unpriced" {
+			return false
+		}
+		// A key's daily spend cap resets at 00:00 UTC, its Retry-After
+		// hours away: no retry within a call helps.
+		if e.Status == 429 && e.ErrorType == "key_spend_cap_reached" {
 			return false
 		}
 		if policy == retryMutation {
