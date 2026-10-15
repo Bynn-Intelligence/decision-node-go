@@ -242,6 +242,11 @@ A booster is a specialist model that reads the request's images before the decis
 |---|---|---|
 | `age` (`dn.BoosterAge`) | A picture of a person; the largest face is read | `*dn.AgeReading`: `Image`, `Faces`, and `AgeYears`, `Low`, `High` (the range, in years) and `Confidence`, each nil when `Faces` is 0 |
 | `ai_generated` (`dn.BoosterAIGenerated`) | Any picture | `*dn.AIGeneratedReading`: `Image`, `Generated` (the probability that an image generator made it), `Confidence`, `Method` (`inference`, read from the pixels, or `c2pa`, the file's Content Credentials say so), `TopGenerator` (`Name`, `Probability`; nil unless the picture reads as likely generated, and on every `c2pa` reading), `C2PASigner` (who signed the file's Content Credentials, nil unless they are trusted) and `C2PA` (`"untrusted"` when the file carries Content Credentials that are not trusted, else nil) |
+| `face_detection` (`dn.BoosterFaceDetection`) | Any picture | `*dn.FaceDetectionReading`: `Image`, `Faces` (how many it found) and `Detections`, each face's `Box` and `Confidence` (at most 64, so `Faces` can be larger) |
+| `face_recognition` (`dn.BoosterFaceRecognition`) | Any picture, searched against a collection: `dn.FaceRecognitionBooster(collection, threshold)`, see [Collections](#collections) | `*dn.FaceRecognitionReading`: `Image`, `CollectionName`, `Faces` (how many it searched) and `Matches` by score, each `Box`, `Score`, `Collection`, `Reference`, `Name` (a public figure's) or `Label`, `CollectionName` and the item's `Metadata` |
+| `ocr` (`dn.BoosterOCR`) | Any picture; `dn.OCRBooster(prompt)` asks for something specific | `*dn.OCRReading`: `Image`, `Text` (the text, or the answer to the prompt) and `Truncated` |
+| `bynn_depth` (`dn.BoosterDepth`), Depth Vision | Any picture; `dn.DepthBooster(gridSize)` sets the grid, 2 to 16 cells a side (8) | `*dn.DepthReading`, in meters: `Image`, `Ahead` (the nearest obstacle straight ahead, the floor left out; nil when none is found), `Directions` (the same in 7 strips from left to right, each nil when none), `Ground` (a floor was found and left out), `GridRows`, `GridCols` and `Grid` (row by row from the top left), `DepthMin`, `DepthMax`, `DepthMedian`, and the picture's `Width` and `Height` in pixels. Estimates from one picture, for decisions and planning, never a safety stop |
+| `bynn_segment` (`dn.BoosterSegment`), Segment Vision | Any picture, with what to find: `dn.SegmentBooster(dn.SegmentOptions{Prompts: ...})`, 1 to 4 phrases of at most 120 characters, and `MaxInstances` (1 to 16, 8), `MinScore` (0 to 1, 0.25), `PolygonPoints` (3 to 64, 24) and `Depth` (true) | `*dn.SegmentReading`: `Image`, `Width`, `Height`, `Prompts`, `Instances` by score (each `Label`, the phrase it matched, `Score`, `Box`, `Polygon`, `Area`, `Centroid`, `Opening`, the largest hole it encloses or nil, and with depth on its `Depth` and `SizeM` in meters), `DepthSource` and `AssumedHFOVDeg`. Coordinates are fractions of the picture from its top left; distances and sizes are estimates, never a safety stop |
 
 ```go
 d, err := client.Decide(ctx, dn.Request{
@@ -273,7 +278,7 @@ for _, r := range d.Evidence.Get("ai_generated").Results {
 fmt.Println(*d.Usage.BoosterTokens, *d.Usage.Boosters)
 ```
 
-`Request.Boosters` holds up to 4 boosters, each at most once, in the order you give, usually by name (`dn.BoosterAge` and `dn.BoosterAIGenerated` name the two). Names are plain strings, so a booster added to the API later works with this version too. A booster that needs a setting is a `dn.Booster`:
+`Request.Boosters` holds up to 4 boosters, each at most once, in the order you give, usually by name (each booster in the table above has its constant, such as `dn.BoosterAge`). Names are plain strings, so a booster added to the API later works with this version too. A booster that needs a setting is a `dn.Booster`, made by its constructor or by hand:
 
 ```go
 Boosters: []any{
@@ -282,14 +287,29 @@ Boosters: []any{
 },
 ```
 
-It is sent as `{"name": "ai_generated", "images": ["listing"], "require": true}`, and a booster in that JSON wire form (a `map[string]any`) is accepted too. A `dn.Booster` with no field but `Name` is sent as the bare name.
+It is sent as `{"name": "ai_generated", "images": ["listing"], "require": true}`, and a booster in that JSON wire form (a `map[string]any`) is accepted too.
+
+```go
+d, err := client.Decide(ctx, dn.Request{
+	Images:   []dn.Image{dn.ImageURL("front", "https://files.example.com/drone/7/front.jpg")},
+	Boosters: []any{dn.DepthBooster(8), dn.SegmentBooster(dn.SegmentOptions{Prompts: []string{"landing pad"}})},
+	Questions: dn.Questions{dn.Q("pad_ahead", dn.Truth("Is there a landing pad in front of the drone?"))},
+})
+for _, r := range d.Evidence.Get(dn.BoosterSegment).Results {
+	if s, ok := r.(*dn.SegmentReading); ok {
+		for _, m := range s.Instances {
+			fmt.Println(m.Label, m.Score, m.Centroid.X, m.Centroid.Y)
+		}
+	}
+}
+``` A `dn.Booster` with no field but `Name` is sent as the bare name.
 
 | `dn.Booster` field | Sends |
 |---|---|
 | `Name` | The booster's name. |
 | `Images` | The ids of the request's images the booster reads. Nil: every image of the request. |
 | `Require` | `dn.Ptr(true)`: a booster that fails or does not answer in time fails the request with a 529 `*dn.OverloadedError` whose `ErrorType` is `booster_unavailable`, retried like any 529. Nil or `dn.Ptr(false)`: the decision runs without that reading, and its evidence says why. |
-| `Options` | The booster's settings. Neither booster has any today. |
+| `Options` | The booster's settings: `ocr`'s `prompt`, `face_recognition`'s `collection` and `threshold`, `bynn_depth`'s `grid_size`, and `bynn_segment`'s `prompt`, `max_instances`, `min_score`, `polygon_points` and `depth`. `dn.OCRBooster`, `dn.FaceRecognitionBooster`, `dn.DepthBooster` and `dn.SegmentBooster` set them. |
 
 `d.Evidence` holds one `*dn.Evidence` per booster the request named, in the request's order, and `d.Evidence.Get(name)` finds one by name: `Booster` (its name), `Version` (the booster's version, such as `age-v3`), `Status` (`ok`; `timeout`, no answer in its time; `error`; `skipped`, none of the request's images is one it reads), `LatencyMs`, `BilledCalls` (the calls of that booster billed on this request) and `Results`, one reading per picture the booster was to read. A reading of a booster this version does not know, or one with a field missing or of the wrong type, is a `*dn.UnknownReading` whose `Raw` holds its fields; the decision does not fail. So is a picture the booster did not read (it timed out or failed: `{"image": "selfie"}`, `Status` says why) or could not decode (`{"image": "selfie", "readable": false}`); neither is billed. Fields a reading adds that this version does not know are ignored. `Usage.BoosterTokens` is the readings' share of `Usage.InputTokens`, and `Usage.Boosters` the booster calls billed. Without boosters, `Evidence` and both usage fields are nil.
 
