@@ -390,10 +390,11 @@ type DepthReading struct {
 	Image string
 	// Ahead is the distance to the nearest obstacle straight ahead (the
 	// middle third of the picture's width), the floor left out; nil when
-	// none is found.
+	// none is found (null or not sent).
 	Ahead *float64
 	// Directions is the same reading in 7 equal strips of the picture, left
-	// to right, each nil when none is found.
+	// to right, each nil when none is found. Always 7 entries: any other
+	// count makes the reading an *UnknownReading.
 	Directions []*float64
 	// Ground is true when a floor or ground was found and left out of Ahead
 	// and Directions.
@@ -478,14 +479,14 @@ type SegmentDepth struct {
 
 // SegmentSize is a match's size in meters, from the assumed field of view.
 type SegmentSize struct {
-	Width, Height *float64
+	Width, Height float64
 	// Opening is the opening's size; nil when there is none.
 	Opening *SegmentOpeningSize
 }
 
 // SegmentOpeningSize is an opening's size in meters.
 type SegmentOpeningSize struct {
-	Width, Height *float64
+	Width, Height float64
 }
 
 // TopGenerator is the likeliest image generator of an AIGeneratedReading.
@@ -698,20 +699,25 @@ func parseReading(booster string, v any) Reading {
 }
 
 // parseDepth reads a Depth Vision reading; nil when a field is missing or
-// of the wrong type.
+// of the wrong type. Ahead may be null or left out; Directions has exactly 7
+// entries; the grid's sides and the picture's are whole numbers of 0 or
+// more.
 func parseDepth(raw map[string]any, image string) *DepthReading {
 	ahead, okAhead := nullableNumber(raw, "ahead")
+	if _, present := raw["ahead"]; !present {
+		ahead, okAhead = nil, true
+	}
 	ground, okGround := raw["ground"].(bool)
-	rows, okRows := wholeNumber(raw["grid_rows"])
-	cols, okCols := wholeNumber(raw["grid_cols"])
+	rows, okRows := size(raw["grid_rows"])
+	cols, okCols := size(raw["grid_cols"])
 	nearest, okMin := raw["depth_min"].(float64)
 	farthest, okMax := raw["depth_max"].(float64)
 	median, okMedian := raw["depth_median"].(float64)
-	width, okWidth := wholeNumber(raw["width"])
-	height, okHeight := wholeNumber(raw["height"])
+	width, okWidth := size(raw["width"])
+	height, okHeight := size(raw["height"])
 	dirs, okDirs := raw["directions"].([]any)
 	grid, okGrid := raw["grid"].([]any)
-	if !okAhead || !okGround || !okRows || !okCols || !okMin || !okMax || !okMedian || !okWidth || !okHeight || !okDirs || !okGrid {
+	if !okAhead || !okGround || !okRows || !okCols || !okMin || !okMax || !okMedian || !okWidth || !okHeight || !okDirs || len(dirs) != 7 || !okGrid {
 		return nil
 	}
 	r := &DepthReading{Image: image, Ahead: ahead, Ground: ground, GridRows: rows, GridCols: cols, DepthMin: nearest, DepthMax: farthest,
@@ -747,8 +753,8 @@ func parseDepth(raw map[string]any, image string) *DepthReading {
 // parseSegment reads a Segment Vision reading; nil when a field is missing
 // or of the wrong type.
 func parseSegment(raw map[string]any, image string) *SegmentReading {
-	width, okWidth := wholeNumber(raw["width"])
-	height, okHeight := wholeNumber(raw["height"])
+	width, okWidth := size(raw["width"])
+	height, okHeight := size(raw["height"])
 	prompts, okPrompts := raw["prompts"].([]any)
 	instances, okInstances := raw["instances"].([]any)
 	source, okSource := optionalString(raw["depth_source"])
@@ -812,9 +818,9 @@ func segmentInstance(v any) (SegmentInstance, bool) {
 	switch d := m["depth"].(type) {
 	case nil:
 	case map[string]any:
-		median, ok1 := nullableNumber(d, "median")
-		opening, ok2 := nullableNumber(d, "opening_median")
-		rim, ok3 := nullableNumber(d, "opening_rim_median")
+		median, ok1 := optionalNumber(d["median"])
+		opening, ok2 := optionalNumber(d["opening_median"])
+		rim, ok3 := optionalNumber(d["opening_rim_median"])
 		if !ok1 || !ok2 || !ok3 {
 			return SegmentInstance{}, false
 		}
@@ -825,8 +831,8 @@ func segmentInstance(v any) (SegmentInstance, bool) {
 	switch z := m["size_m"].(type) {
 	case nil:
 	case map[string]any:
-		w, ok1 := nullableNumber(z, "width")
-		h, ok2 := nullableNumber(z, "height")
+		w, ok1 := z["width"].(float64)
+		h, ok2 := z["height"].(float64)
 		if !ok1 || !ok2 {
 			return SegmentInstance{}, false
 		}
@@ -834,8 +840,8 @@ func segmentInstance(v any) (SegmentInstance, bool) {
 		switch o := z["opening"].(type) {
 		case nil:
 		case map[string]any:
-			ow, ok1 := nullableNumber(o, "width")
-			oh, ok2 := nullableNumber(o, "height")
+			ow, ok1 := o["width"].(float64)
+			oh, ok2 := o["height"].(float64)
 			if !ok1 || !ok2 {
 				return SegmentInstance{}, false
 			}
@@ -862,6 +868,23 @@ func nullableNumber(m map[string]any, key string) (*float64, bool) {
 		return &x, true
 	}
 	return nil, false
+}
+
+// optionalNumber reads a field that is a number, null or not sent.
+func optionalNumber(v any) (*float64, bool) {
+	switch x := v.(type) {
+	case nil:
+		return nil, true
+	case float64:
+		return &x, true
+	}
+	return nil, false
+}
+
+// size reads a whole number of 0 or more: a count of cells or pixels.
+func size(v any) (int, bool) {
+	n, ok := wholeNumber(v)
+	return n, ok && n >= 0
 }
 
 // numbers reads a list of exactly n numbers.

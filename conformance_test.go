@@ -527,8 +527,53 @@ func normReading(r dn.Reading) any {
 		return map[string]any{"kind": "face_recognition", "image": x.Image, "collection_name": nilIfEmpty(x.CollectionName), "faces": x.Faces, "matches": matches}
 	case *dn.OCRReading:
 		return map[string]any{"kind": "ocr", "image": x.Image, "text": x.Text, "truncated": x.Truncated}
+	case *dn.DepthReading:
+		dirs := []any{}
+		for _, d := range x.Directions {
+			dirs = append(dirs, floatOrNil(d))
+		}
+		return map[string]any{"kind": "bynn_depth", "image": x.Image, "ahead": floatOrNil(x.Ahead), "directions": dirs, "ground": x.Ground,
+			"grid_rows": x.GridRows, "grid_cols": x.GridCols, "grid": x.Grid, "depth_min": x.DepthMin, "depth_max": x.DepthMax,
+			"depth_median": x.DepthMedian, "width": x.Width, "height": x.Height}
+	case *dn.SegmentReading:
+		instances := []any{}
+		for _, in := range x.Instances {
+			instances = append(instances, normInstance(in))
+		}
+		return map[string]any{"kind": "bynn_segment", "image": x.Image, "width": x.Width, "height": x.Height, "prompts": x.Prompts,
+			"instances": instances, "depth_source": nilIfEmpty(x.DepthSource), "assumed_hfov_deg": floatOrNil(x.AssumedHFOVDeg)}
 	}
 	return map[string]any{"kind": "unknown", "raw": r.Raw()}
+}
+
+// normInstance is a Segment Vision match in the wire's names and shapes:
+// points and boxes as arrays, an empty opening, depth or size as null.
+func normInstance(in dn.SegmentInstance) any {
+	point := func(p dn.SegmentPoint) any { return []any{p.X, p.Y} }
+	points := func(ps []dn.SegmentPoint) any {
+		out := []any{}
+		for _, p := range ps {
+			out = append(out, point(p))
+		}
+		return out
+	}
+	var opening, depth, size any
+	if o := in.Opening; o != nil {
+		opening = map[string]any{"polygon": points(o.Polygon), "centroid": point(o.Centroid), "width": o.Width, "height": o.Height,
+			"offset": point(o.Offset), "area": o.Area}
+	}
+	if d := in.Depth; d != nil {
+		depth = map[string]any{"median": floatOrNil(d.Median), "opening_median": floatOrNil(d.OpeningMedian), "opening_rim_median": floatOrNil(d.OpeningRimMedian)}
+	}
+	if z := in.SizeM; z != nil {
+		var o any
+		if z.Opening != nil {
+			o = map[string]any{"width": z.Opening.Width, "height": z.Opening.Height}
+		}
+		size = map[string]any{"width": z.Width, "height": z.Height, "opening": o}
+	}
+	return map[string]any{"label": in.Label, "score": in.Score, "box": []any{in.Box.X1, in.Box.Y1, in.Box.X2, in.Box.Y2},
+		"polygon": points(in.Polygon), "area": in.Area, "centroid": point(in.Centroid), "opening": opening, "depth": depth, "size_m": size}
 }
 
 func normBox(b dn.FaceBox) any {
