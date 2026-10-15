@@ -40,7 +40,7 @@ Implements version 1.3 of the DecisionNode SDK surface: boosters and fine-tuned 
 
 ### Changed
 
-- A Depth Vision reading whose `directions` is not exactly 7 entries, or whose grid sides or picture size are not whole numbers of 0 or more, is an `*UnknownReading`, as is a Segment Vision reading whose picture size is not; `ahead` and a match's depth medians may be left out (nil). `SegmentSize` and `SegmentOpeningSize` hold `Width` and `Height` as `float64`, which the API always sends. The conformance tests run suite 1.21.
+- A Depth Vision reading whose `directions` is not exactly 7 entries, or whose grid sides or picture size are not whole numbers of 0 or more, is an `*UnknownReading`, as is a Segment Vision reading whose picture size is not; `ahead` and a match's depth medians may be left out (nil). `SegmentSize` and `SegmentOpeningSize` hold `Width` and `Height` as `float64`, which the API always sends. The conformance tests run suite 1.22.
 - `Batch` has no `PriceFactor`, and `ModelBatch` no `PricePerMillionInputTokens` or `PriceFactor`: the API sends none of them. The batch price is each model's `BatchPriceFactor`, and each line's charge is in its usage.
 - The default model is `decisionnode-moe` (it was `decisionnode-latest`), the family id that always means the current release; `decisionnode-flash` is the fast one. A pinned id is `decisionnode-<family>-<version>`, read from the model list, and an answer names the pinned id that answered. The earlier ids stay accepted by the API.
 - `SpecVersion` is `"1.3"`.
