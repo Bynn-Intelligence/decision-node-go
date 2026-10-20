@@ -535,6 +535,8 @@ func normReading(r dn.Reading) any {
 		return map[string]any{"kind": "bynn_depth", "image": x.Image, "ahead": floatOrNil(x.Ahead), "directions": dirs, "ground": x.Ground,
 			"grid_rows": x.GridRows, "grid_cols": x.GridCols, "grid": x.Grid, "depth_min": x.DepthMin, "depth_max": x.DepthMax,
 			"depth_median": x.DepthMedian, "width": x.Width, "height": x.Height}
+	case *dn.KnowledgeReading:
+		return normKnowledge(x)
 	case *dn.SegmentReading:
 		instances := []any{}
 		for _, in := range x.Instances {
@@ -846,6 +848,16 @@ func (r refs) resolve(path string) any {
 			cur = x.Raw[part]
 		case *dn.CollectionItem:
 			cur = x.Raw[part]
+		case *dn.KnowledgeReading:
+			cur = x.Raw()[part]
+		case *dn.ChunkPage:
+			cur = x.Raw[part]
+		case []any:
+			i, _ := strconv.Atoi(part)
+			if i < 0 || i >= len(x) {
+				return nil
+			}
+			cur = x[i]
 		case *dn.UsagePage:
 			cur = x.Raw[part]
 		case *dn.CreatedKey:
@@ -1004,6 +1016,10 @@ func decodeBoosters(v any, r refs) []any {
 	out := make([]any, 0, len(arr))
 	for _, item := range arr {
 		o, ok := item.(*object)
+		if ok && len(o.keys) == 1 && o.keys[0] == "$knowledge" {
+			out = append(out, decodeKnowledge(o.vals["$knowledge"].(*object), r))
+			continue
+		}
 		if !ok || len(o.keys) != 1 || o.keys[0] != "$booster" {
 			out = append(out, plainArg(item, r))
 			continue
@@ -1347,6 +1363,9 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 		// The same request handed to the SDK's check instead of being sent.
 		return nil, runCheck(root, c, method, args, r)
 	}
+	if res, handled, err := invokeKnowledge(ctx, root, c, method, args, r); handled {
+		return res, err
+	}
 	switch method {
 	case "decide":
 		req, err := decodeRequest(root, args, r)
@@ -1501,7 +1520,11 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 		}
 		return c.Batches().Cancel(ctx, id)
 	case "collections.create":
-		return c.Collections().Create(ctx, str(plainArg(args.vals["name"], r)), str(plainArg(args.vals["type"], r)))
+		p := dn.CollectionCreate{Name: str(plainArg(args.vals["name"], r)), Type: str(plainArg(args.vals["type"], r))}
+		if v, ok := get(args, "scope_key"); ok && v != nil {
+			p.ScopeKey = dn.Ptr(str(plainArg(v, r)))
+		}
+		return c.Collections().CreateWith(ctx, p)
 	case "collections.list":
 		return c.Collections().List(ctx)
 	case "collections.get":
@@ -1538,6 +1561,10 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 		}
 		if v, ok := get(args, "metadata"); ok {
 			u.Metadata = metadataArg(v)
+		}
+		u.Pinned, u.PinRank = boolArg(args, "pinned"), intArg(args, "pin_rank")
+		if v, ok := get(args, "title"); ok && v != nil {
+			u.Title = dn.Ptr(str(plainArg(v, r)))
 		}
 		return c.Collections().UpdateItem(ctx, str(plainArg(args.vals["collection_id"], r)), str(plainArg(args.vals["item_id"], r)), u)
 	case "collections.list_items":
@@ -2254,7 +2281,7 @@ func capArg(v any) *float64 {
 }
 
 // collectionKinds are the expectations of the collections calls' results.
-var collectionKinds = []string{"collection", "collections", "item", "item_page", "deleted"}
+var collectionKinds = []string{"collection", "collections", "item", "item_page", "chunk_page", "deleted", "knowledge"}
 
 // checkCollectionResult compares a collections call's result, by its
 // fields' wire names; collections is the list, compared entry by entry.
@@ -2308,7 +2335,26 @@ func checkCollectionResult(kind string, want, result any, path string) error {
 		if !ok {
 			return fmt.Errorf("%s: expected a delete, got %T", path, result)
 		}
-		got = canon(map[string]any{"id": d.ID, "deleted": d.Deleted})
+		m := map[string]any{"id": d.ID, "deleted": d.Deleted}
+		if _, sent := d.Raw["status"]; sent {
+			m["status"] = d.Status
+		}
+		if _, sent := d.Raw["deleted"]; !sent {
+			m["deleted"] = nil
+		}
+		got = canon(m)
+	case "chunk_page":
+		p, ok := result.(*dn.ChunkPage)
+		if !ok {
+			return fmt.Errorf("%s: expected a page of chunks, got %T", path, result)
+		}
+		got = normChunkPage(p)
+	case "knowledge":
+		k, ok := result.(*dn.KnowledgeReading)
+		if !ok {
+			return fmt.Errorf("%s: expected a KnowledgeReading, got %T", path, result)
+		}
+		got = canon(normKnowledge(k))
 	}
 	w, _ := want.(map[string]any)
 	return match(orEmpty(w), got, path)
@@ -2319,8 +2365,10 @@ func normCollection(c *dn.Collection) any {
 	if c.Deletion != nil {
 		deletion = map[string]any{"at": c.Deletion.At, "reason": c.Deletion.Reason}
 	}
-	return canon(map[string]any{"id": c.ID, "type": c.Type, "name": c.Name, "public": c.Public, "items": c.Items,
-		"created_at": nilIfEmpty(c.CreatedAt), "deletion": deletion})
+	m := map[string]any{"id": c.ID, "type": c.Type, "name": c.Name, "public": c.Public, "items": c.Items,
+		"created_at": nilIfEmpty(c.CreatedAt), "deletion": deletion}
+	normTextCollection(c, m)
+	return canon(m)
 }
 
 func normItem(it *dn.CollectionItem) any {
@@ -2344,6 +2392,7 @@ func normItem(it *dn.CollectionItem) any {
 		}
 		m["usage"] = u
 	}
+	normDocumentFields(it, m)
 	return canon(m)
 }
 
@@ -2513,7 +2562,8 @@ func runResponse(t *testing.T, root string, m *mock, c *object) error {
 		return match(exp["batch"], normBatch(result.(*dn.Batch)), "batch")
 	case exp["batch_page"] != nil:
 		return match(exp["batch_page"], normBatchPage(result.(*dn.BatchPage)), "batch_page")
-	case exp["collection"] != nil, exp["collections"] != nil, exp["item"] != nil, exp["item_page"] != nil, exp["deleted"] != nil:
+	case exp["collection"] != nil, exp["collections"] != nil, exp["item"] != nil, exp["item_page"] != nil, exp["deleted"] != nil,
+		exp["chunk_page"] != nil, exp["knowledge"] != nil:
 		for _, kind := range collectionKinds {
 			if want, ok := exp[kind]; ok {
 				return checkCollectionResult(kind, want, result, kind)
@@ -2621,7 +2671,7 @@ func checkOutcome(spec map[string]any, result any, err error, path string) error
 			return fmt.Errorf("%s: expected batch results, got %T", path, result)
 		}
 		return checkResultsSpec(spec, rs, path)
-	case "collection", "collections", "item", "item_page", "deleted":
+	case "collection", "collections", "item", "item_page", "chunk_page", "deleted", "knowledge":
 		return checkCollectionResult(kind, spec[kind], result, path+"."+kind)
 	case "key_usage", "usage_page", "usage_items":
 		return checkUsageResult(kind, spec[kind], result, path+"."+kind)
@@ -3026,6 +3076,11 @@ func runBehaviour(t *testing.T, root string, m *mock, c *object) error {
 	}
 	if same, ok := exp["same_header"].(map[string]any); ok {
 		if e := checkSameHeader(same, info.Requests); e != nil {
+			return e
+		}
+	}
+	if distinct, ok := exp["distinct_header"].(map[string]any); ok {
+		if e := checkDistinctHeader(distinct, info.Requests); e != nil {
 			return e
 		}
 	}

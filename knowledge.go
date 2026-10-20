@@ -16,7 +16,6 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -275,25 +274,37 @@ func (c *Client) prepareDocument(doc Document, o DocumentOptions) (*preparedDocu
 		stem := fileStem(file.filename)
 		title = &stem
 	}
-	entries, reason := documentEntries(o, title)
+	// The document's own entries first, then its fields', as the API lists
+	// them.
+	var entries []any
+	reason := ""
+	add := func(e map[string]any, why string) {
+		entries = append(entries, e)
+		if reason == "" {
+			reason = why
+		}
+	}
 	if inline && title == nil {
-		entries = append([]any{map[string]any{"type": "missing", "loc": []any{"body", "title"}, "msg": "Field required", "input": nil}}, entries...)
-		reason = "title: Field required"
+		add(map[string]any{"type": "missing", "loc": []any{"body", "title"}, "msg": "Field required", "input": nil}, "title: Field required")
+	}
+	if title != nil {
+		if e := titleEntry(*title); e != nil {
+			add(e, fmt.Sprintf("title must be 1 to %d characters", MaxTitleChars))
+		}
 	}
 	if doc.kind == docText {
-		if doc.format != "" && doc.format != FormatMarkdown && doc.format != FormatText {
-			entries = append(entries, map[string]any{"type": "literal_error", "loc": []any{"body", "format"}, "msg": "Input should be 'markdown' or 'text'",
-				"input": echoed(doc.format)})
-			if reason == "" {
-				reason = "format must be markdown or text"
-			}
-		}
 		if doc.text == "" {
-			entries = append(entries, map[string]any{"type": "string_too_short", "loc": []any{"body", "text"}, "msg": "The text is empty", "input": ""})
-			if reason == "" {
-				reason = "the text is empty"
-			}
+			add(map[string]any{"type": "string_too_short", "loc": []any{"body", "text"}, "msg": "The text is empty", "input": ""}, "the text is empty")
 		}
+		if doc.format != "" && doc.format != FormatMarkdown && doc.format != FormatText {
+			add(map[string]any{"type": "literal_error", "loc": []any{"body", "format"}, "msg": "Input should be 'markdown' or 'text'",
+				"input": echoed(doc.format)}, "format must be markdown or text")
+		}
+	}
+	fields, why := itemFieldEntries(o.Reference, o.Label, o.Metadata, o.PinRank)
+	entries = append(entries, fields...)
+	if reason == "" {
+		reason = why
 	}
 	if len(entries) > 0 {
 		return nil, localValidation(reason, entries...)
@@ -413,9 +424,10 @@ func documentFields(member func(string, any) error, o DocumentOptions) error {
 	return nil
 }
 
-// documentEntries are the API's 422 entries for a document's fields, with
-// the reason of the first.
-func documentEntries(o DocumentOptions, title *string) ([]any, string) {
+// itemFieldEntries are the API's 422 entries for the fields every document
+// write shares, as every collection item's, and its pin rank, with the
+// reason of the first.
+func itemFieldEntries(reference, label *string, metadata map[string]any, pinRank *int) ([]any, string) {
 	var entries []any
 	reason := ""
 	add := func(e map[string]any, why string) {
@@ -424,28 +436,23 @@ func documentEntries(o DocumentOptions, title *string) ([]any, string) {
 			reason = why
 		}
 	}
-	if title != nil {
-		if e := titleEntry(*title); e != nil {
-			add(e, fmt.Sprintf("title must be 1 to %d characters", MaxTitleChars))
-		}
-	}
-	if o.Reference != nil {
-		if e := textReferenceEntry(*o.Reference); e != nil {
+	if reference != nil {
+		if e := stringEntry([]any{"body", "reference"}, *reference, MaxItemReferenceChars, true); e != nil {
 			add(e, fmt.Sprintf("reference must be 1 to %d characters of A-Z, a-z, 0-9, _ . : and -", MaxItemReferenceChars))
 		}
 	}
-	if o.PinRank != nil {
-		if e := pinRankEntry(*o.PinRank); e != nil {
+	if pinRank != nil {
+		if e := pinRankEntry(*pinRank); e != nil {
 			add(e, fmt.Sprintf("pin_rank must be an integer from 0 to %d", MaxPinRank))
 		}
 	}
-	if o.Label != nil {
-		if e := textLabelEntry(*o.Label); e != nil {
+	if label != nil {
+		if e := stringEntry([]any{"body", "label"}, *label, MaxItemLabelChars, false); e != nil {
 			add(e, fmt.Sprintf("label must be 1 to %d characters", MaxItemLabelChars))
 		}
 	}
-	if o.Metadata != nil {
-		if ms := metadataEntries(o.Metadata); len(ms) > 0 {
+	if metadata != nil {
+		if ms := metadataEntries(metadata); len(ms) > 0 {
 			entries = append(entries, ms...)
 			if reason == "" {
 				reason = "metadata: " + ms[0].(map[string]any)["msg"].(string)
@@ -465,27 +472,6 @@ func titleEntry(title string) map[string]any {
 	return map[string]any{"type": "string_too_long", "loc": []any{"body", "title"}, "msg": "A title is 1 to 200 characters", "input": echoed(title)}
 }
 
-// textReferenceEntry is a text item's entry for a reference not of its
-// pattern; nil when it is.
-func textReferenceEntry(ref string) map[string]any {
-	if itemReference.MatchString(ref) {
-		return nil
-	}
-	return map[string]any{"type": "string_pattern_mismatch", "loc": []any{"body", "reference"},
-		"msg": fmt.Sprintf("String should match pattern '%s'", itemReferencePattern), "input": echoed(ref)}
-}
-
-// textLabelEntry is a text item's entry for a label empty or over 128
-// characters; nil when it is neither.
-func textLabelEntry(label string) map[string]any {
-	n := utf8.RuneCountInString(label)
-	if n >= 1 && n <= MaxItemLabelChars {
-		return nil
-	}
-	return map[string]any{"type": "string_too_long", "loc": []any{"body", "label"},
-		"msg": "A label is 1 to 128 characters with no control or invisible characters", "input": echoed(label)}
-}
-
 func pinRankEntry(rank int) map[string]any {
 	if rank >= 0 && rank <= MaxPinRank {
 		return nil
@@ -494,9 +480,10 @@ func pinRankEntry(rank int) map[string]any {
 }
 
 // readDocument reads a file document's bytes and settles its type and file
-// name, refusing locally what the presign would refuse: over 50 MB, empty,
-// or of a type that is not a knowledge type or cannot be told. i is the
-// file's place in the presign, for the message.
+// name, refusing locally what the presign would refuse: a type that is not a
+// knowledge type, an empty file, or one over 50 MB. A type that cannot be
+// told is an argument error. i is the file's place in the presign, for the
+// message.
 func readDocument(doc Document, i int) (*docFile, error) {
 	f := &docFile{contentType: doc.contentType, filename: doc.filename}
 	switch doc.kind {
@@ -533,23 +520,26 @@ func readDocument(doc Document, i int) (*docFile, error) {
 	default:
 		return nil, errors.New("decisionnode: the document has no content")
 	}
-	files := fmt.Sprintf("files[%d]", i)
-	switch {
-	case len(f.data) > MaxDocumentBytes:
-		msg := fmt.Sprintf("%s.byte_size: %d is over the limit of %d bytes.", files, len(f.data), MaxDocumentBytes)
-		return nil, localBadRequest("api_usage_error", msg, msg)
-	case len(f.data) == 0:
-		msg := files + ".byte_size: must be at least 1."
-		return nil, localBadRequest("api_usage_error", msg, msg)
-	}
 	if f.contentType == "" && f.filename != "" {
 		f.contentType = contentTypeByExt[strings.ToLower(path.Ext(f.filename))]
 	}
 	if f.contentType == "" {
 		f.contentType = sniffDocument(f.data)
 	}
-	if !knowledgeType(f.contentType) {
-		msg := files + ".content_type: must be one of " + strings.Join(KnowledgeContentTypes, ", ") + "."
+	if f.contentType == "" {
+		return nil, errors.New("decisionnode: the document's type cannot be told from its name or its first bytes: give a content type or a file name")
+	}
+	files := fmt.Sprintf("files[%d]", i)
+	var msg string
+	switch {
+	case !knowledgeType(f.contentType):
+		msg = fmt.Sprintf("%s.content_type: must be one of %s, got %s.", files, strings.Join(KnowledgeContentTypes, ", "), f.contentType)
+	case len(f.data) == 0:
+		msg = fmt.Sprintf("%s.byte_size: must be an integer from 1 to %d.", files, MaxDocumentBytes)
+	case len(f.data) > MaxDocumentBytes:
+		msg = fmt.Sprintf("%s.byte_size: %d is over the limit of %d bytes.", files, len(f.data), MaxDocumentBytes)
+	}
+	if msg != "" {
 		return nil, localBadRequest("api_usage_error", msg, msg)
 	}
 	return f, nil
@@ -603,17 +593,21 @@ func (c *Client) inlineText(f *docFile) (string, bool) {
 	return string(f.data), true
 }
 
-// fileStem is a file name without its last extension.
+// fileStem is a file name without its last extension; a name whose only dot
+// leads it is its own stem.
 func fileStem(name string) string {
-	return strings.TrimSuffix(name, path.Ext(name))
+	if !strings.Contains(strings.TrimLeft(name, "."), ".") {
+		return name
+	}
+	return name[:strings.LastIndex(name, ".")]
 }
 
 // UploadDocuments uploads 1 to 16 documents as files, whatever their type
 // and size (a text as text/markdown, or text/plain for FormatText), and
 // returns each one's upload, in order: name it later with DocumentUpload. An
 // upload not named within its hour expires. A Document made with
-// DocumentUpload returns its own id with a zero ExpiresAt. The documents are
-// presigned in one POST /v1/uploads, then sent in parallel. A knowledge
+// DocumentUpload is an argument error. The documents are
+// presigned in one POST /v1/uploads, then sent in order. A knowledge
 // upload needs a full-scope key.
 func (c *Client) UploadDocuments(ctx context.Context, docs []Document) ([]UploadResult, error) {
 	if c.err != nil {
@@ -627,11 +621,10 @@ func (c *Client) UploadDocuments(ctx context.Context, docs []Document) ([]Upload
 	var files []*docFile
 	var where []int
 	for i, doc := range docs {
-		if doc.kind == docUpload {
-			out[i] = UploadResult{ID: doc.uploadID}
-			continue
+		if doc.kind == docUpload || doc.kind == docNone {
+			return nil, fmt.Errorf("decisionnode: document %d must be a text or a file", i)
 		}
-		f, err := readDocument(doc, len(files))
+		f, err := readDocument(doc, i)
 		if err != nil {
 			return nil, err
 		}
@@ -652,8 +645,8 @@ func (c *Client) UploadDocuments(ctx context.Context, docs []Document) ([]Upload
 }
 
 // uploadDocuments presigns the files with the knowledge purpose in one call
-// and PUTs them in parallel, each attempt allowed the document upload
-// timeout. A PUT refused 403 after its URL's lifetime is presigned again
+// and PUTs them one after another, in order, each attempt allowed the
+// document upload timeout. A PUT refused 403 after its URL's lifetime is presigned again
 // once. Nothing is cached: an upload is consumed by the item it makes.
 func (c *Client) uploadDocuments(ctx context.Context, files []*docFile) ([]UploadResult, error) {
 	timeout := DefaultDocumentUploadTimeout
@@ -664,37 +657,21 @@ func (c *Client) uploadDocuments(ctx context.Context, files []*docFile) ([]Uploa
 	if err != nil {
 		return nil, err
 	}
-	pctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	errs := make([]error, len(files))
-	var wg sync.WaitGroup
+	// One PUT at a time, in the presign's order.
 	for i := range files {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			err := c.put(pctx, ups[i], files[i].data, timeout)
-			var e *Error
-			if errors.As(err, &e) && e.Status == http.StatusForbidden && !c.now().Before(urlsExpire) {
-				var again []presigned
-				if again, _, err = c.presignDocuments(pctx, files[i:i+1]); err == nil {
-					ups[i] = again[0]
-					err = c.put(pctx, ups[i], files[i].data, timeout)
-				}
+		err := c.put(ctx, ups[i], files[i].data, timeout)
+		var e *Error
+		if errors.As(err, &e) && e.Status == http.StatusForbidden && !c.now().Before(urlsExpire) {
+			// The URL outlived its lifetime before the bytes landed: presign
+			// this file again, once.
+			var again []presigned
+			if again, _, err = c.presignDocuments(ctx, files[i:i+1]); err == nil {
+				ups[i] = again[0]
+				err = c.put(ctx, ups[i], files[i].data, timeout)
 			}
-			if errs[i] = err; err != nil {
-				cancel()
-			}
-		}(i)
-	}
-	wg.Wait()
-	for _, e := range errs {
-		if e != nil && !(isCanceled(e) && ctx.Err() == nil) {
-			return nil, e
 		}
-	}
-	for _, e := range errs {
-		if e != nil {
-			return nil, e
+		if err != nil {
+			return nil, err
 		}
 	}
 	out := make([]UploadResult, len(files))
@@ -839,17 +816,17 @@ func (s *CollectionService) ListChunks(ctx context.Context, collectionID, itemID
 	return page, nil
 }
 
-// FailedDeleted is the answer to DeleteFailedItems: how many failed
+// FailedDeleted is the answer to DeleteFailed: how many failed
 // documents were deleted.
 type FailedDeleted struct {
 	Deleted int
 	Raw     map[string]any
 }
 
-// DeleteFailedItems deletes every failed document of a text collection with
+// DeleteFailed deletes every failed document of a text collection with
 // DELETE /v1/collections/{id}/items?status=failed. A failed document counts
 // toward nothing, but stays visible with its Error until it is deleted.
-func (s *CollectionService) DeleteFailedItems(ctx context.Context, collectionID string) (*FailedDeleted, error) {
+func (s *CollectionService) DeleteFailed(ctx context.Context, collectionID string) (*FailedDeleted, error) {
 	if s.c.err != nil {
 		return nil, s.c.err
 	}
@@ -866,15 +843,15 @@ func (s *CollectionService) DeleteFailedItems(ctx context.Context, collectionID 
 	return d, nil
 }
 
-// WaitOptions are WaitUntilReady's settings; a zero field takes its default.
+// WaitOptions are WaitUntilReady's settings; a nil field takes its default.
 type WaitOptions struct {
-	// Timeout is how long to wait in all (DefaultReadyTimeout, 300 s). It
-	// must not be negative.
-	Timeout time.Duration
-	// PollInterval is the first wait between reads (DefaultReadyPollInterval,
-	// 1 s), at least MinReadyPollInterval; each later wait is 1.5 times the
-	// last, up to MaxReadyPollInterval.
-	PollInterval time.Duration
+	// Timeout is how long to wait in all, from the call
+	// (DefaultReadyTimeout, 300 s). It must be above 0.
+	Timeout *time.Duration
+	// PollInterval is the first wait between reads
+	// (DefaultReadyPollInterval, 1 s), at least MinReadyPollInterval; each
+	// later wait is 1.5 times the last, up to MaxReadyPollInterval.
+	PollInterval *time.Duration
 }
 
 // WaitUntilReady reads a document with GET
@@ -926,21 +903,19 @@ func (s *CollectionService) WaitUntilCollectionReady(ctx context.Context, collec
 // WaitUntilReady documents.
 func (s *CollectionService) poll(ctx context.Context, p string, o WaitOptions, done func([]byte) (bool, error)) error {
 	c := s.c
-	if o.Timeout < 0 {
-		return fmt.Errorf("decisionnode: the timeout must be above 0, got %s", o.Timeout)
+	timeout, interval := DefaultReadyTimeout, DefaultReadyPollInterval
+	if o.Timeout != nil {
+		if timeout = *o.Timeout; timeout <= 0 {
+			return fmt.Errorf("decisionnode: the timeout must be above 0, got %s", timeout)
+		}
 	}
-	if o.PollInterval < 0 || (o.PollInterval > 0 && o.PollInterval < MinReadyPollInterval) {
-		return fmt.Errorf("decisionnode: the poll interval must be at least %s, got %s", MinReadyPollInterval, o.PollInterval)
+	if o.PollInterval != nil {
+		if interval = *o.PollInterval; interval < MinReadyPollInterval {
+			return fmt.Errorf("decisionnode: the poll interval must be at least %s, got %s", MinReadyPollInterval, interval)
+		}
 	}
 	if c.err != nil {
 		return c.err
-	}
-	timeout, interval := o.Timeout, o.PollInterval
-	if timeout == 0 {
-		timeout = DefaultReadyTimeout
-	}
-	if interval == 0 {
-		interval = DefaultReadyPollInterval
 	}
 	start := time.Now()
 	var slept time.Duration
@@ -957,16 +932,13 @@ func (s *CollectionService) poll(ctx context.Context, p string, o WaitOptions, d
 		if ok {
 			return nil
 		}
-		wait := interval
-		if hinted > wait {
-			wait = hinted
-		}
-		// The waits are counted as well as the clock, so a sleep that
-		// returns early still ends the wait.
-		elapsed := max(time.Since(start), slept)
-		if elapsed+wait > timeout {
+		// The deadline is the clock's; the waits are counted too, so a
+		// sleep that returns early still moves toward it.
+		spent := max(time.Since(start), slept)
+		if spent >= timeout {
 			return &TimeoutError{&Error{msg: fmt.Sprintf("not ready after %s", timeout)}}
 		}
+		wait := min(max(interval, hinted), timeout-spent)
 		if err := c.sleep(ctx, wait); err != nil {
 			return &Error{msg: "the request was canceled", Err: err}
 		}
@@ -1146,9 +1118,9 @@ type KnowledgeReading struct {
 	// PendingItems is how many documents are not ready yet.
 	PendingItems int
 	Search       KnowledgeSearch
-	// Truncated is true when a passage was dropped to fit the context; false
-	// on a search's answer.
-	Truncated bool
+	// Truncated is true when a passage was dropped to fit the context; nil
+	// when not sent, as on a search's answer.
+	Truncated *bool
 }
 
 // KnowledgeCorpus is the version of a collection a reading searched.
@@ -1211,27 +1183,46 @@ type KnowledgePassage struct {
 	// Score is the similarity; nil for a pinned passage.
 	Score   *float64
 	Lexical bool
-	// Rendered is false when the passage was left out to fit; false on a
-	// search's passages.
-	Rendered bool
+	// Rendered is false when the passage was left out to fit; nil when not
+	// sent, as on a search's passages.
+	Rendered *bool
 	// Text is the passage's text; "" unless the text was included, and on
 	// a search.
 	Text string
 	Raw  map[string]any
 }
 
-// parseKnowledge reads a knowledge reading. One with a required field
-// missing or of the wrong type, or such a passage, is not one (false).
+// parseKnowledge reads a knowledge reading. One with a field missing or of
+// the wrong type (collection and passages are required, the rest may be null
+// or absent), or with such a passage, is not one (false).
 func parseKnowledge(raw map[string]any) (*KnowledgeReading, bool) {
 	collection, ok := raw["collection"].(string)
 	if !ok {
 		return nil, false
 	}
 	list, ok := raw["passages"].([]any)
-	if !ok {
+	if !ok || !optional[string](raw, "collection_name") || !optional[bool](raw, "truncated") {
 		return nil, false
 	}
+	for _, k := range []string{"corpus", "query", "budget", "scope", "omitted", "search"} {
+		if !optional[map[string]any](raw, k) {
+			return nil, false
+		}
+	}
 	r := &KnowledgeReading{readingBase: readingBase{raw: raw}, Collection: collection, Warnings: []string{}, Passages: []KnowledgePassage{}}
+	switch ws := raw["warnings"].(type) {
+	case nil:
+	case []any:
+		for _, w := range ws {
+			s, ok := w.(string)
+			if !ok {
+				return nil, false
+			}
+			r.Warnings = append(r.Warnings, s)
+		}
+	default:
+		return nil, false
+	}
 	for _, v := range list {
 		p, ok := knowledgePassage(v)
 		if !ok {
@@ -1259,13 +1250,6 @@ func parseKnowledge(raw map[string]any) (*KnowledgeReading, bool) {
 		r.Scope.Key, _ = m["key"].(string)
 		r.Scope.Value, _ = m["value"].(string)
 	}
-	if ws, ok := raw["warnings"].([]any); ok {
-		for _, w := range ws {
-			if s, ok := w.(string); ok {
-				r.Warnings = append(r.Warnings, s)
-			}
-		}
-	}
 	if m, ok := raw["omitted"].(map[string]any); ok {
 		r.Omitted = make(map[string]int, len(m))
 		for k, v := range m {
@@ -1280,8 +1264,20 @@ func parseKnowledge(raw map[string]any) (*KnowledgeReading, bool) {
 		r.Search.Candidates, _ = wholeNumber(m["candidates"])
 		r.Search.Fallback, _ = m["fallback"].(bool)
 	}
-	r.Truncated, _ = raw["truncated"].(bool)
+	if t, ok := raw["truncated"].(bool); ok {
+		r.Truncated = &t
+	}
 	return r, true
+}
+
+// optional reports whether m's key is null, absent or of type T.
+func optional[T any](m map[string]any, key string) bool {
+	v, ok := m[key]
+	if !ok || v == nil {
+		return true
+	}
+	_, ok = v.(T)
+	return ok
 }
 
 func knowledgePassage(v any) (KnowledgePassage, bool) {
@@ -1300,15 +1296,31 @@ func knowledgePassage(v any) (KnowledgePassage, bool) {
 	if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 {
 		return KnowledgePassage{}, false
 	}
+	for _, k := range []string{"reference", "title", "heading", "text"} {
+		if !optional[string](m, k) {
+			return KnowledgePassage{}, false
+		}
+	}
+	if !optional[float64](m, "score") || !optional[bool](m, "lexical") || !optional[bool](m, "rendered") {
+		return KnowledgePassage{}, false
+	}
+	if t, ok := m["tokens"]; ok && t != nil {
+		n, ok := wholeNumber(t)
+		if !ok {
+			return KnowledgePassage{}, false
+		}
+		p.Tokens = n
+	}
 	p.Reference, _ = m["reference"].(string)
 	p.Title, _ = m["title"].(string)
 	p.Heading, _ = m["heading"].(string)
-	p.Tokens, _ = wholeNumber(m["tokens"])
 	if f, ok := m["score"].(float64); ok {
 		p.Score = &f
 	}
 	p.Lexical, _ = m["lexical"].(bool)
-	p.Rendered, _ = m["rendered"].(bool)
+	if b, ok := m["rendered"].(bool); ok {
+		p.Rendered = &b
+	}
 	p.Text, _ = m["text"].(string)
 	return p, true
 }

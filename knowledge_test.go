@@ -147,9 +147,8 @@ func TestDocumentsCheckedLocally(t *testing.T) {
 		doc dn.Document
 		msg string
 	}{
-		{dn.DocumentData(nil, "application/pdf", "a.pdf"), "files[0].byte_size: must be at least 1."},
+		{dn.DocumentData(nil, "application/pdf", "a.pdf"), "files[0].byte_size: must be an integer from 1 to 52428800."},
 		{dn.DocumentData(make([]byte, dn.MaxDocumentBytes+1), "application/pdf", ""), "files[0].byte_size: 52428801 is over the limit of 52428800 bytes."},
-		{dn.DocumentData([]byte("PK\x03\x04"), "", ""), "files[0].content_type: must be one of text/plain, text/markdown, application/pdf,"},
 		{dn.DocumentData([]byte("x"), "application/zip", "a.zip"), "files[0].content_type: must be one of"},
 	} {
 		_, err := cols.AddDocument(ctx, "col_1", tc.doc, dn.DocumentOptions{})
@@ -199,7 +198,7 @@ func TestWaitUntilReady(t *testing.T) {
 		}
 	}
 
-	_, err = c.Collections().WaitUntilReady(context.Background(), "col_1", "itm_1", dn.WaitOptions{PollInterval: 50 * time.Millisecond})
+	_, err = c.Collections().WaitUntilReady(context.Background(), "col_1", "itm_1", dn.WaitOptions{PollInterval: dn.Ptr(50 * time.Millisecond)})
 	if err == nil || !strings.Contains(err.Error(), "poll interval") {
 		t.Fatalf("poll interval: %v", err)
 	}
@@ -210,13 +209,13 @@ func TestWaitUntilReadyTimesOut(t *testing.T) {
 		respond(w, 200, `{"id":"col_1","type":"text","status_counts":{"queued":1,"processing":0,"ready":0,"failed":0}}`, nil)
 	})
 	c := client(t, srv.URL, dn.WithSleep(func(ctx context.Context, d time.Duration) error { return nil }))
-	_, err := c.Collections().WaitUntilCollectionReady(context.Background(), "col_1", dn.WaitOptions{Timeout: 3 * time.Second})
+	_, err := c.Collections().WaitUntilCollectionReady(context.Background(), "col_1", dn.WaitOptions{Timeout: dn.Ptr(3 * time.Second)})
 	var te *dn.TimeoutError
 	if !errors.As(err, &te) {
 		t.Fatalf("%v", err)
 	}
-	// Reads at 0, 1 and 2.5 s; the next would be at 4.75 s.
-	if rec.count() != 3 {
+	// Reads at 0, 1, 2.5 and 3 s, the last wait cut to the deadline.
+	if rec.count() != 4 {
 		t.Fatalf("%d reads", rec.count())
 	}
 }
@@ -266,7 +265,7 @@ func TestKnowledgeReading(t *testing.T) {
 	}
 
 	s, err := c.Collections().Search(ctx, "col_1", "rule", dn.SearchOptions{TopK: dn.Ptr(2), MaxTokens: "auto"})
-	if err != nil || s.Passages[0].Text != "Rule" || s.Query.Text != "rule" || s.Truncated {
+	if err != nil || s.Passages[0].Text != "Rule" || s.Query.Text != "rule" || s.Truncated != nil || s.Passages[0].Rendered != nil {
 		t.Fatalf("search: %#v %v", s, err)
 	}
 	if got := string(rec.bodies[1]); got != `{"query":"rule","top_k":2,"max_tokens":"auto"}` {
@@ -314,7 +313,7 @@ func TestCheckDocumentAndHook(t *testing.T) {
 		t.Fatalf("check: %v", err)
 	}
 	var br *dn.BadRequestError
-	if err := cols.CheckDocument(dn.DocumentData([]byte("PK\x03\x04"), "", ""), dn.DocumentOptions{}); !errors.As(err, &br) {
+	if err := cols.CheckDocument(dn.DocumentData([]byte("PK\x03\x04"), "application/zip", "a.zip"), dn.DocumentOptions{}); !errors.As(err, &br) {
 		t.Fatalf("check file: %v", err)
 	}
 	if err := cols.CheckDocument(dn.DocumentData([]byte("%PDF-1.7"), "", "a.pdf"), dn.DocumentOptions{}); err != nil {
