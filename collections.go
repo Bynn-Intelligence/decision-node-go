@@ -226,7 +226,11 @@ type CollectionItemPage struct {
 	// none.
 	Reference       string
 	ReferencePrefix string
-	Raw             map[string]any
+	// Q and Sort are a text collection's search and order, as sent; "" when
+	// none.
+	Q    string
+	Sort string
+	Raw  map[string]any
 }
 
 // Deleted is the answer to a delete: the id deleted and Deleted true. A text
@@ -269,7 +273,24 @@ type ItemListOptions struct {
 	// other, each 1 to 64 characters of A-Z, a-z, 0-9, _ . : and -.
 	Reference       *string
 	ReferencePrefix *string
+	// Q lists a text collection's documents whose title, file name or
+	// reference holds it, case-insensitively: 1 to 200 characters.
+	Q *string
+	// Sort orders a text collection's documents: SortNewest (the server's
+	// default), SortOldest or SortTitle.
+	Sort *string
 }
+
+// The orders of a text collection's items list.
+const (
+	SortNewest = "newest"
+	SortOldest = "oldest"
+	SortTitle  = "title"
+)
+
+// MaxItemQueryChars is the longest search text of a text collection's items
+// list, in characters.
+const MaxItemQueryChars = 200
 
 // CollectionService is the Collections API: the workspace's collections of
 // faces, which the face_recognition booster searches.
@@ -678,6 +699,28 @@ func (s *CollectionService) ListItems(ctx context.Context, collectionID string, 
 		}
 		query += f.name + "=" + url.QueryEscape(*f.value)
 	}
+	if opts.Q != nil {
+		if n := utf8.RuneCountInString(*opts.Q); n < 1 || n > MaxItemQueryChars {
+			return nil, usageError("Query parameter q must be 1 to 200 characters.")
+		}
+	}
+	if opts.Sort != nil && *opts.Sort != SortNewest && *opts.Sort != SortOldest && *opts.Sort != SortTitle {
+		return nil, usageError(fmt.Sprintf("Query parameter sort must be newest, oldest or title, got %s.", printable(*opts.Sort, 16)))
+	}
+	for _, f := range []struct {
+		name  string
+		value *string
+	}{{"q", opts.Q}, {"sort", opts.Sort}} {
+		if f.value == nil {
+			continue
+		}
+		if query == "" {
+			query = "?"
+		} else {
+			query += "&"
+		}
+		query += f.name + "=" + url.QueryEscape(*f.value)
+	}
 	resp, err := s.c.doPayload(ctx, http.MethodGet, collectionPath(collectionID)+"/items"+query, nil)
 	if err != nil {
 		return nil, err
@@ -695,6 +738,8 @@ func (s *CollectionService) ListItems(ctx context.Context, collectionID string, 
 		Capped     bool              `json:"total_capped"`
 		Reference  *string           `json:"reference"`
 		Prefix     *string           `json:"reference_prefix"`
+		Q          *string           `json:"q"`
+		Sort       *string           `json:"sort"`
 	}
 	_ = json.Unmarshal(resp.data, &shape)
 	page := &CollectionItemPage{Items: []CollectionItem{}, Offset: shape.Offset, Limit: shape.Limit, Total: shape.Total, NextOffset: shape.NextOffset,
@@ -704,6 +749,12 @@ func (s *CollectionService) ListItems(ctx context.Context, collectionID string, 
 	}
 	if shape.Prefix != nil {
 		page.ReferencePrefix = *shape.Prefix
+	}
+	if shape.Q != nil {
+		page.Q = *shape.Q
+	}
+	if shape.Sort != nil {
+		page.Sort = *shape.Sort
 	}
 	for _, data := range shape.Items {
 		item, err := parseItem(data)

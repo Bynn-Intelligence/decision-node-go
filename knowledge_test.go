@@ -326,3 +326,24 @@ func TestCheckDocumentAndHook(t *testing.T) {
 		t.Fatalf("wait: %v, hooked %v", err, hooked)
 	}
 }
+
+func TestListItemsSearchAndSort(t *testing.T) {
+	srv, _ := server(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		if r.URL.RawQuery != "limit=5&q=claims+policy&sort=title" {
+			respond(w, 400, `{"detail":{"error_type":"api_usage_error","message":"`+r.URL.RawQuery+`"}}`, nil)
+			return
+		}
+		respond(w, 200, `{"items":[],"offset":0,"limit":5,"total":0,"total_capped":false,"next_offset":null,"q":"claims policy","sort":"title","reference":null,"reference_prefix":null}`, nil)
+	})
+	cols := client(t, srv.URL).Collections()
+	page, err := cols.ListItems(context.Background(), "col_1", dn.ItemListOptions{Limit: dn.Ptr(5), Q: dn.Ptr("claims policy"), Sort: dn.Ptr(dn.SortTitle)})
+	if err != nil || page.Q != "claims policy" || page.Sort != "title" {
+		t.Fatalf("%#v %v", page, err)
+	}
+	for _, o := range []dn.ItemListOptions{{Q: dn.Ptr("")}, {Q: dn.Ptr(strings.Repeat("q", 201))}, {Sort: dn.Ptr("size")}} {
+		var br *dn.BadRequestError
+		if _, err := cols.ListItems(context.Background(), "col_1", o); !errors.As(err, &br) || br.ErrorType != "api_usage_error" {
+			t.Fatalf("%v", err)
+		}
+	}
+}

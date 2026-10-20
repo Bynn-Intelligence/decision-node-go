@@ -16,6 +16,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -607,7 +608,7 @@ func fileStem(name string) string {
 // returns each one's upload, in order: name it later with DocumentUpload. An
 // upload not named within its hour expires. A Document made with
 // DocumentUpload is an argument error. The documents are
-// presigned in one POST /v1/uploads, then sent in order. A knowledge
+// presigned in one POST /v1/uploads, then sent in parallel. A knowledge
 // upload needs a full-scope key.
 func (c *Client) UploadDocuments(ctx context.Context, docs []Document) ([]UploadResult, error) {
 	if c.err != nil {
@@ -645,8 +646,8 @@ func (c *Client) UploadDocuments(ctx context.Context, docs []Document) ([]Upload
 }
 
 // uploadDocuments presigns the files with the knowledge purpose in one call
-// and PUTs them one after another, in order, each attempt allowed the
-// document upload timeout. A PUT refused 403 after its URL's lifetime is presigned again
+// and PUTs them in parallel, each attempt allowed the document upload
+// timeout. A PUT refused 403 after its URL's lifetime is presigned again
 // once. Nothing is cached: an upload is consumed by the item it makes.
 func (c *Client) uploadDocuments(ctx context.Context, files []*docFile) ([]UploadResult, error) {
 	timeout := DefaultDocumentUploadTimeout
@@ -657,21 +658,40 @@ func (c *Client) uploadDocuments(ctx context.Context, files []*docFile) ([]Uploa
 	if err != nil {
 		return nil, err
 	}
-	// One PUT at a time, in the presign's order.
+	pctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errs := make([]error, len(files))
+	var wg sync.WaitGroup
 	for i := range files {
-		err := c.put(ctx, ups[i], files[i].data, timeout)
-		var e *Error
-		if errors.As(err, &e) && e.Status == http.StatusForbidden && !c.now().Before(urlsExpire) {
-			// The URL outlived its lifetime before the bytes landed: presign
-			// this file again, once.
-			var again []presigned
-			if again, _, err = c.presignDocuments(ctx, files[i:i+1]); err == nil {
-				ups[i] = again[0]
-				err = c.put(ctx, ups[i], files[i].data, timeout)
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			err := c.put(pctx, ups[i], files[i].data, timeout)
+			var e *Error
+			if errors.As(err, &e) && e.Status == http.StatusForbidden && !c.now().Before(urlsExpire) {
+				// The URL outlived its lifetime before the bytes landed:
+				// presign this file again, once.
+				var again []presigned
+				if again, _, err = c.presignDocuments(pctx, files[i:i+1]); err == nil {
+					ups[i] = again[0]
+					err = c.put(pctx, ups[i], files[i].data, timeout)
+				}
 			}
+			if errs[i] = err; err != nil {
+				cancel()
+			}
+		}(i)
+	}
+	wg.Wait()
+	for _, e := range errs {
+		// The first error that is not the cancellation the others caused.
+		if e != nil && !(isCanceled(e) && ctx.Err() == nil) {
+			return nil, e
 		}
-		if err != nil {
-			return nil, err
+	}
+	for _, e := range errs {
+		if e != nil {
+			return nil, e
 		}
 	}
 	out := make([]UploadResult, len(files))

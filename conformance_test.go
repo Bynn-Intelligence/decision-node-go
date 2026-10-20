@@ -1583,6 +1583,12 @@ func invoke(ctx context.Context, root string, c *dn.Client, call *object, r refs
 		if v, ok := get(args, "reference_prefix"); ok && v != nil {
 			opts.ReferencePrefix = dn.Ptr(str(plainArg(v, r)))
 		}
+		if v, ok := get(args, "q"); ok && v != nil {
+			opts.Q = dn.Ptr(str(plainArg(v, r)))
+		}
+		if v, ok := get(args, "sort"); ok && v != nil {
+			opts.Sort = dn.Ptr(str(plainArg(v, r)))
+		}
 		return c.Collections().ListItems(ctx, str(plainArg(args.vals["collection_id"], r)), opts)
 	case "collections.delete_item":
 		return c.Collections().DeleteItem(ctx, str(plainArg(args.vals["collection_id"], r)), str(plainArg(args.vals["item_id"], r)))
@@ -2329,8 +2335,18 @@ func checkCollectionResult(kind string, want, result any, path string) error {
 			next = *p.NextOffset
 		}
 		got = canon(map[string]any{"items": items, "offset": p.Offset, "limit": p.Limit, "total": p.Total, "next_offset": next,
-			"total_capped": p.TotalCapped, "reference": nilIfEmpty(p.Reference), "reference_prefix": nilIfEmpty(p.ReferencePrefix)})
+			"total_capped": p.TotalCapped, "reference": nilIfEmpty(p.Reference), "reference_prefix": nilIfEmpty(p.ReferencePrefix),
+			"q": nilIfEmpty(p.Q), "sort": nilIfEmpty(p.Sort)})
 	case "deleted":
+		if f, ok := result.(*dn.FailedDeleted); ok {
+			m := map[string]any{}
+			for k, v := range f.Raw {
+				m[k] = v
+			}
+			m["deleted"] = f.Deleted
+			w, _ := want.(map[string]any)
+			return match(orEmpty(w), canon(m), path)
+		}
 		d, ok := result.(*dn.Deleted)
 		if !ok {
 			return fmt.Errorf("%s: expected a delete, got %T", path, result)
