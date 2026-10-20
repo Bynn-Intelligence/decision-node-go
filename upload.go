@@ -437,7 +437,7 @@ func (c *Client) uploadNow(ctx context.Context, imgs []Image, keys []cacheKey) (
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			err := c.put(pctx, ups[i], imgs[i].src.data)
+			err := c.put(pctx, ups[i], imgs[i].src.data, c.uploadTimeout)
 			var e *Error
 			if errors.As(err, &e) && e.Status == http.StatusForbidden && !c.now().Before(urlsExpire) {
 				// The URL outlived its lifetime before the bytes landed:
@@ -445,7 +445,7 @@ func (c *Client) uploadNow(ctx context.Context, imgs []Image, keys []cacheKey) (
 				var again []presigned
 				if again, _, err = c.presign(pctx, imgs[i:i+1], keys[i:i+1]); err == nil {
 					ups[i] = again[0]
-					err = c.put(pctx, ups[i], imgs[i].src.data)
+					err = c.put(pctx, ups[i], imgs[i].src.data, c.uploadTimeout)
 				}
 			}
 			if errs[i] = err; err != nil {
@@ -503,6 +503,13 @@ func (c *Client) presign(ctx context.Context, imgs []Image, keys []cacheKey) ([]
 	if err != nil {
 		return nil, time.Time{}, encodeError(err)
 	}
+	return c.presignFiles(ctx, payload, len(imgs))
+}
+
+// presignFiles sends one POST /v1/uploads of n files, already encoded, and
+// checks every URL of its answer before any byte is sent. It returns when
+// the URLs stop being valid, by the client's clock.
+func (c *Client) presignFiles(ctx context.Context, payload []byte, n int) ([]presigned, time.Time, error) {
 	resp, err := c.doPayload(ctx, http.MethodPost, "/v1/uploads", payload)
 	if err != nil {
 		return nil, time.Time{}, err
@@ -514,8 +521,8 @@ func (c *Client) presign(ctx context.Context, imgs []Image, keys []cacheKey) ([]
 	if err := json.Unmarshal(resp.data, &answer); err != nil {
 		return nil, time.Time{}, invalidResponse(resp, err)
 	}
-	if len(answer.Uploads) != len(imgs) {
-		return nil, time.Time{}, invalidResponse(resp, fmt.Errorf("%d uploads for %d files", len(answer.Uploads), len(imgs)))
+	if len(answer.Uploads) != n {
+		return nil, time.Time{}, invalidResponse(resp, fmt.Errorf("%d uploads for %d files", len(answer.Uploads), n))
 	}
 	for _, up := range answer.Uploads {
 		if err := checkStorageURL(up.URL); err != nil {
@@ -544,23 +551,24 @@ func checkStorageURL(raw string) error {
 			}
 		}
 	}
-	return &Error{ErrorType: "upload_failed", msg: "the storage URL must be https; the image was not sent"}
+	return &Error{ErrorType: "upload_failed", msg: "the storage URL must be https; the file was not sent"}
 }
 
 var storageCode = regexp.MustCompile(`<Code>([^<]*)</Code>`)
 
-// put sends one image to its presigned URL with exactly the headers the
+// put sends one file to its presigned URL with exactly the headers the
 // presign returned: no Authorization, none of the client's own headers, no
-// redirect followed. It is retried on 5xx and connection errors like any
-// call; a 412 on a retry means an earlier attempt stored the object.
-func (c *Client) put(ctx context.Context, up presigned, data []byte) error {
+// redirect followed, each attempt allowed timeout. It is retried on 5xx and
+// connection errors like any call; a 412 on a retry means an earlier attempt
+// stored the object.
+func (c *Client) put(ctx context.Context, up presigned, data []byte, timeout time.Duration) error {
 	u, err := url.Parse(up.URL)
 	if err != nil {
 		return &Error{ErrorType: "upload_failed", msg: "the storage URL is not valid", Err: err}
 	}
 	path := u.Path
 	for attempt := 0; ; attempt++ {
-		status, header, body, err := c.putOnce(ctx, up, data, path, attempt)
+		status, header, body, err := c.putOnce(ctx, up, data, path, attempt, timeout)
 		switch {
 		case err != nil:
 			if ctx.Err() != nil || attempt >= c.maxRetries {
@@ -586,8 +594,8 @@ func (c *Client) put(ctx context.Context, up presigned, data []byte) error {
 	}
 }
 
-func (c *Client) putOnce(ctx context.Context, up presigned, data []byte, path string, attempt int) (int, http.Header, []byte, error) {
-	actx, cancel := context.WithTimeout(ctx, c.uploadTimeout)
+func (c *Client) putOnce(ctx context.Context, up presigned, data []byte, path string, attempt int, timeout time.Duration) (int, http.Header, []byte, error) {
+	actx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(actx, http.MethodPut, up.URL, bytes.NewReader(data))
 	if err != nil {
@@ -610,7 +618,7 @@ func (c *Client) putOnce(ctx context.Context, up presigned, data []byte, path st
 	if err != nil {
 		c.log(ctx, http.MethodPut, path, 0, "", elapsed, attempt, err)
 		if ctx.Err() == nil && (errors.Is(actx.Err(), context.DeadlineExceeded) || isTimeout(err)) {
-			return 0, nil, nil, &TimeoutError{&Error{msg: "the upload timed out after " + c.uploadTimeout.String(), Err: err}}
+			return 0, nil, nil, &TimeoutError{&Error{msg: "the upload timed out after " + timeout.String(), Err: err}}
 		}
 		return 0, nil, nil, c.transportError(ctx, actx, err)
 	}

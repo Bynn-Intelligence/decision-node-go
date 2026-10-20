@@ -35,13 +35,23 @@ const itemReferencePattern = "^[A-Za-z0-9_.:-]{1,64}$"
 
 var itemReference = regexp.MustCompile(itemReferencePattern)
 
+// The types of collection.
+const (
+	// CollectionFace holds faces, which face_recognition searches.
+	CollectionFace = "face"
+	// CollectionText holds documents (a knowledge base), which the
+	// knowledge booster and Search read.
+	CollectionText = "text"
+)
+
 // Collection is a collection object: one of the workspace's own collections
-// of faces, or a public one it may search. Every field is as sent.
+// of faces or of documents, or a public one it may search. Every field is as
+// sent; the fields of a text collection are empty on a face collection.
 type Collection struct {
 	// ID is "col_" and 32 hex digits for the workspace's own collection; a
 	// public collection's id is its name, such as "celebrities".
 	ID string
-	// Type is "face".
+	// Type is CollectionFace or CollectionText.
 	Type string
 	Name string
 	// Public is true on a public collection, which is read-only.
@@ -52,8 +62,47 @@ type Collection struct {
 	CreatedAt string
 	// Deletion is set while the workspace's items are marked for deletion.
 	Deletion *CollectionDeletion
+	// ScopeKey is a text collection's scope key, the metadata key whose
+	// value scopes an item; "" when it has none.
+	ScopeKey string
+	// Chunks and Tokens are what a text collection's ready documents hold.
+	Chunks int
+	Tokens int
+	// Version is a text collection's corpus version, which moves on every
+	// change to what is served.
+	Version int
+	// StatusCounts counts a text collection's documents by status; nil when
+	// not sent.
+	StatusCounts *StatusCounts
+	// Pinned is a text collection's pinned load against its cap; nil when
+	// not sent.
+	Pinned *PinnedLoad
 	// Raw is the collection object as sent.
 	Raw map[string]any
+}
+
+// StatusCounts counts a text collection's documents by status.
+type StatusCounts struct {
+	Queued     int `json:"queued"`
+	Processing int `json:"processing"`
+	Ready      int `json:"ready"`
+	Failed     int `json:"failed"`
+}
+
+// PinnedLoad is the tokens a text collection's pinned documents hold: the
+// global ones, with the largest scope value's beside them, against the cap.
+type PinnedLoad struct {
+	Tokens int `json:"tokens"`
+	Cap    int `json:"cap"`
+	// LargestScope is the scope value whose pins hold the most tokens; nil
+	// when there is none.
+	LargestScope *ScopeLoad `json:"largest_scope"`
+}
+
+// ScopeLoad is one scope value's pinned tokens.
+type ScopeLoad struct {
+	Value  string `json:"value"`
+	Tokens int    `json:"tokens"`
 }
 
 // CollectionDeletion says when and why a collection's items will be deleted.
@@ -63,7 +112,9 @@ type CollectionDeletion struct {
 }
 
 // CollectionItem is an item of a collection: one enrolled face, known by its
-// reference and, when it has one, its label. The picture is never kept.
+// reference and, when it has one, its label (the picture is never kept), or
+// one document of a text collection. A field the item's kind does not have
+// is empty.
 type CollectionItem struct {
 	// ID is "itm_" and 32 hex digits.
 	ID string
@@ -83,10 +134,74 @@ type CollectionItem struct {
 	// Usage is what an enrollment billed; nil on a listed item.
 	Usage *EnrollmentUsage
 	// Metadata is the item's own keys and values as sent; nil when it has
-	// none.
+	// none. A document's scope value is the collection's scope key here.
 	Metadata map[string]any
+
+	// The fields of a document, each as sent and empty when not sent.
+
+	Title string
+	// Format is "markdown" or "text" for a document sent as text.
+	Format  string
+	Pinned  bool
+	PinRank int
+	// Source is "article" (sent as text) or "file" (an uploaded file).
+	Source string
+	// File describes an uploaded file; nil for an article.
+	File *ItemFile
+	// Status is the newest version's: "queued", "processing", "ready",
+	// "failed", or any other value as sent ("uploading" included).
+	Status string
+	// Stage is "extracting", "chunking" or "embedding" while processing;
+	// "" otherwise.
+	Stage string
+	// Progress is how far processing is; nil when not sent.
+	Progress *ItemProgress
+	// Serving is "current", "previous" (an older version serves until the
+	// new one is ready) or "none".
+	Serving string
+	// Error says why the document failed, as a code such as
+	// "pinned_budget_exceeded"; "" when it has not.
+	Error string
+	// Delayed is true when the document has waited in the queue past the
+	// usual time.
+	Delayed bool
+	// Warnings are notes about the text, such as "possible_secret"; empty,
+	// never nil, when there are none.
+	Warnings []string
+	// Chunks and Tokens are what the serving version holds.
+	Chunks        int
+	Tokens        int
+	ContentSHA256 string
+	Version       int
+	QueuedAt      string
+	ReadyAt       string
+	// Text is the stored text, only from GetItem with includeText; nil
+	// otherwise, and while no version serves. Byte offsets of chunks and
+	// passages are UTF-8 byte offsets into it, end exclusive.
+	Text *string
+
 	// Raw is the item object as sent.
 	Raw map[string]any
+}
+
+// ItemFile is the file a document was made from.
+type ItemFile struct {
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
+	ByteSize    int    `json:"byte_size"`
+	// Pages is the page count of a paged file; nil when not known.
+	Pages *int `json:"pages"`
+	// OriginalHeld is true while the original file is still kept; it is
+	// deleted once a version is ready, and only its text is kept.
+	OriginalHeld bool `json:"original_held"`
+}
+
+// ItemProgress is how far a document's processing is.
+type ItemProgress struct {
+	ChunksEmbedded int `json:"chunks_embedded"`
+	ChunksTotal    int `json:"chunks_total"`
+	// Pages is the pages read so far; nil when not sent.
+	Pages *int `json:"pages"`
 }
 
 // EnrollmentUsage is what one enrollment billed, as sent.
@@ -114,11 +229,16 @@ type CollectionItemPage struct {
 	Raw             map[string]any
 }
 
-// Deleted is the answer to a delete: the id deleted and Deleted true.
+// Deleted is the answer to a delete: the id deleted and Deleted true. A text
+// collection not purged within the server's time answers with Deleted false
+// and Status "purging": the purge goes on, and both answers are success.
 type Deleted struct {
 	ID      string
 	Deleted bool
-	Raw     map[string]any
+	// Status is "purging" while a text collection is being purged; "" when
+	// not sent.
+	Status string
+	Raw    map[string]any
 }
 
 // Enrollment is one face to enroll: the image it is in, the caller's own
@@ -158,40 +278,76 @@ type CollectionService struct{ c *Client }
 // Collections returns the client's Collections API.
 func (c *Client) Collections() *CollectionService { return &CollectionService{c: c} }
 
-// Create creates a collection with POST /v1/collections. typ "" is "face",
-// the only type. The name is 1 to 80 characters; a name or a type the API
-// would refuse is refused locally with a *ValidationError and its entries.
-// The call carries an Idempotency-Key, new for each call and the same on
-// every attempt, so it is retried like any call and creates one collection
-// however often it is sent; a 409 idempotency_in_progress is retried after
-// its Retry-After.
+// Create creates a collection with POST /v1/collections: typ "" is
+// CollectionFace, or CollectionText for a knowledge base. CreateWith also
+// takes a text collection's scope key. The name is 1 to 80 characters; a
+// name or a type the API would refuse is refused locally with a
+// *ValidationError and its entries. The call carries an Idempotency-Key, new
+// for each call and the same on every attempt, so it is retried like any
+// call and creates one collection however often it is sent; a 409
+// idempotency_in_progress is retried after its Retry-After.
 func (s *CollectionService) Create(ctx context.Context, name, typ string) (*Collection, error) {
+	return s.CreateWith(ctx, CollectionCreate{Name: name, Type: typ})
+}
+
+// CollectionCreate is the collection CreateWith creates.
+type CollectionCreate struct {
+	// Name is 1 to 80 characters.
+	Name string
+	// Type is CollectionFace (also for "") or CollectionText.
+	Type string
+	// ScopeKey, when not nil, is a text collection's scope key: 1 to 40
+	// characters of a-z, 0-9 and _, the metadata key whose value scopes a
+	// document (a mission, a site, a customer), fixed for the collection's
+	// life. Name the value in a search's or the knowledge booster's Scope.
+	ScopeKey *string
+}
+
+// scopeKeyPattern is the API's pattern for a text collection's scope key.
+const scopeKeyPattern = "^[a-z0-9_]{1,40}$"
+
+var scopeKey = regexp.MustCompile(scopeKeyPattern)
+
+// CreateWith creates a collection as Create does, with a text collection's
+// scope key, sent only when given. A scope key not of its pattern is refused
+// locally with a *ValidationError; one given with a face collection is the
+// server's to refuse.
+func (s *CollectionService) CreateWith(ctx context.Context, p CollectionCreate) (*Collection, error) {
 	if s.c.err != nil {
 		return nil, s.c.err
 	}
+	typ := p.Type
 	if typ == "" {
-		typ = "face"
+		typ = CollectionFace
 	}
 	var entries []any
 	reason := ""
-	if typ != "face" {
-		entries = append(entries, map[string]any{"type": "literal_error", "loc": []any{"body", "type"}, "msg": "Input should be 'face'",
-			"input": echoed(typ), "ctx": map[string]any{"expected": "'face'"}})
-		reason = "type must be face"
+	if typ != CollectionFace && typ != CollectionText {
+		entries = append(entries, map[string]any{"type": "literal_error", "loc": []any{"body", "type"}, "msg": "Input should be 'face' or 'text'",
+			"input": echoed(typ), "ctx": map[string]any{"expected": "'face' or 'text'"}})
+		reason = "type must be face or text"
 	}
-	if e := stringEntry([]any{"body", "name"}, name, MaxCollectionNameChars, false); e != nil {
+	if e := stringEntry([]any{"body", "name"}, p.Name, MaxCollectionNameChars, false); e != nil {
 		entries = append(entries, e)
 		if reason == "" {
 			reason = fmt.Sprintf("name must be 1 to %d characters", MaxCollectionNameChars)
+		}
+	}
+	if p.ScopeKey != nil && !scopeKey.MatchString(*p.ScopeKey) {
+		entries = append(entries, map[string]any{"type": "string_pattern_mismatch", "loc": []any{"body", "scope_key"},
+			"msg": "String should match pattern '" + scopeKeyPattern + "'", "input": echoed(*p.ScopeKey)})
+		if reason == "" {
+			reason = "scope_key must be 1 to 40 characters of a-z, 0-9 and _"
 		}
 	}
 	if len(entries) > 0 {
 		return nil, localValidation(reason, entries...)
 	}
 	body, err := marshal(struct {
-		Type string `json:"type"`
-		Name string `json:"name"`
-	}{typ, name})
+		Type     string  `json:"type"`
+		Name     string  `json:"name"`
+		ScopeKey *string `json:"scope_key,omitempty"`
+	}{typ, p.Name, p.ScopeKey})
 	if err != nil {
 		return nil, encodeError(err)
 	}
@@ -250,8 +406,11 @@ func (s *CollectionService) Get(ctx context.Context, collectionID string) (*Coll
 	return parseCollectionResponse(resp)
 }
 
-// Delete deletes a collection and every item in it at once with DELETE
-// /v1/collections/{id}. A public collection cannot be deleted: a
+// Delete deletes a collection and every item in it with DELETE
+// /v1/collections/{id}. A face collection is deleted at once; a text
+// collection is purged, and one not purged within the server's time answers
+// Status "purging" with Deleted false, which is success too (the purge is
+// not waited for). A public collection cannot be deleted: a
 // *PermissionDeniedError with ErrorType collection_read_only.
 func (s *CollectionService) Delete(ctx context.Context, collectionID string) (*Deleted, error) {
 	return s.delete(ctx, collectionPath(collectionID))
@@ -370,11 +529,19 @@ type ItemUpdate struct {
 	// Metadata, when not nil, replaces the item's whole metadata; an empty
 	// map removes every key.
 	Metadata map[string]any
+	// Pinned and PinRank, when not nil, change a document's pin; applied at
+	// once, never re-embedded or billed.
+	Pinned  *bool
+	PinRank *int
+	// Title, when not nil, retitles a document: 1 to 200 characters once
+	// trimmed. It makes a new version (the API's 202).
+	Title *string
 }
 
 // UpdateItem changes an item with PATCH /v1/collections/{id}/items/{item_id},
-// sending only the fields given, and returns the item. They are checked
-// locally as Enroll checks them. It carries an Idempotency-Key, as Create
+// sending only the fields given, and returns the item: 200 with the fields
+// applied, or 202 when a document's new title makes a new version. They are
+// checked locally as Enroll and AddDocument check them. It carries an Idempotency-Key, as Create
 // and Enroll do, and is retried as they are.
 func (s *CollectionService) UpdateItem(ctx context.Context, collectionID, itemID string, u ItemUpdate) (*CollectionItem, error) {
 	if s.c.err != nil {
@@ -426,6 +593,33 @@ func (s *CollectionService) UpdateItem(ctx context.Context, collectionID, itemID
 			}
 		}
 		if err := member("metadata", u.Metadata); err != nil {
+			return nil, err
+		}
+	}
+	if u.Pinned != nil {
+		if err := member("pinned", *u.Pinned); err != nil {
+			return nil, err
+		}
+	}
+	if u.PinRank != nil {
+		if en := pinRankEntry(*u.PinRank); en != nil {
+			entries = append(entries, en)
+			if reason == "" {
+				reason = fmt.Sprintf("pin_rank must be an integer from 0 to %d", MaxPinRank)
+			}
+		}
+		if err := member("pin_rank", *u.PinRank); err != nil {
+			return nil, err
+		}
+	}
+	if u.Title != nil {
+		if en := titleEntry(*u.Title); en != nil {
+			entries = append(entries, en)
+			if reason == "" {
+				reason = fmt.Sprintf("title must be 1 to %d characters", MaxTitleChars)
+			}
+		}
+		if err := member("title", *u.Title); err != nil {
 			return nil, err
 		}
 	}
@@ -543,6 +737,7 @@ func (s *CollectionService) delete(ctx context.Context, path string) (*Deleted, 
 	d := &Deleted{Raw: raw}
 	d.ID, _ = raw["id"].(string)
 	d.Deleted, _ = raw["deleted"].(bool)
+	d.Status, _ = raw["status"].(string)
 	return d, nil
 }
 
@@ -643,6 +838,30 @@ func parseCollection(data []byte) (*Collection, error) {
 	if shape.CreatedAt != nil {
 		col.CreatedAt = *shape.CreatedAt
 	}
+	col.ScopeKey, _ = raw["scope_key"].(string)
+	col.Chunks, _ = wholeNumber(raw["chunks"])
+	col.Tokens, _ = wholeNumber(raw["tokens"])
+	col.Version, _ = wholeNumber(raw["version"])
+	if m, ok := raw["status_counts"].(map[string]any); ok {
+		sc := &StatusCounts{}
+		sc.Queued, _ = wholeNumber(m["queued"])
+		sc.Processing, _ = wholeNumber(m["processing"])
+		sc.Ready, _ = wholeNumber(m["ready"])
+		sc.Failed, _ = wholeNumber(m["failed"])
+		col.StatusCounts = sc
+	}
+	if m, ok := raw["pinned"].(map[string]any); ok {
+		pl := &PinnedLoad{}
+		pl.Tokens, _ = wholeNumber(m["tokens"])
+		pl.Cap, _ = wholeNumber(m["cap"])
+		if ls, ok := m["largest_scope"].(map[string]any); ok {
+			sl := &ScopeLoad{}
+			sl.Value, _ = ls["value"].(string)
+			sl.Tokens, _ = wholeNumber(ls["tokens"])
+			pl.LargestScope = sl
+		}
+		col.Pinned = pl
+	}
 	return col, nil
 }
 
@@ -672,6 +891,7 @@ func parseItem(data []byte) (*CollectionItem, error) {
 	if box, ok := faceBox(raw["box"]); ok {
 		item.Box = &box
 	}
+	readDocumentFields(item, raw)
 	return item, nil
 }
 

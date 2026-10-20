@@ -19,7 +19,7 @@ type prepared struct {
 	// inline: they are never uploaded or cached.
 	videos []byte
 	images []Image
-	// ocr is true when the boosters name ocr.
+	// ocr is true when the boosters name ocr and not knowledge.
 	ocr bool
 }
 
@@ -88,7 +88,9 @@ func (c *Client) prepare(req Request, customID *string) (*prepared, error) {
 		return nil, err
 	}
 	boosters, boosterDepth, err := encodeBoosters(req.Boosters)
-	ocr := namesBooster(boosters, BoosterOCR)
+	// A request naming knowledge keeps the default timeout even with ocr:
+	// knowledge has its own budget, well inside it.
+	ocr := namesBooster(boosters, BoosterOCR) && !namesBooster(boosters, BoosterKnowledge)
 	if err != nil {
 		return nil, err
 	}

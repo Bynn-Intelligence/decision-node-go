@@ -9,6 +9,7 @@ The Go client for the [DecisionNode](https://decisionnode.com) API: ask structur
 - Up to 16 images by URL, from files or from bytes, checked locally and uploaded only when that is faster.
 - Videos sent as the frames you sampled, each with its time.
 - Boosters: specialist readings of your images (an age, whether a picture was AI-generated) added to a decision as evidence.
+- Knowledge: your own documents (policies, procedures, mission briefs) in a knowledge base, with the passages that apply given to each decision and cited back.
 - Your own fine-tuned models, called by name.
 - Typed answers and typed errors, matched with `errors.As`.
 - Retries, timeouts, connection reuse and HTTP/2 built in. One dependency, for WebSockets.
@@ -246,6 +247,7 @@ A booster is a specialist model that reads the request's images before the decis
 | `face_recognition` (`dn.BoosterFaceRecognition`) | Any picture, searched against a collection: `dn.FaceRecognitionBooster(collection, threshold)`, see [Collections](#collections) | `*dn.FaceRecognitionReading`: `Image`, `CollectionName`, `Faces` (how many it searched) and `Matches` by score, each `Box`, `Score`, `Collection`, `Reference`, `Name` (a public figure's) or `Label`, `CollectionName` and the item's `Metadata` |
 | `ocr` (`dn.BoosterOCR`) | Any picture; `dn.OCRBooster(prompt)` asks for something specific | `*dn.OCRReading`: `Image`, `Text` (the text, or the answer to the prompt) and `Truncated` |
 | `bynn_depth` (`dn.BoosterDepth`), Depth Vision | Any picture; `dn.DepthBooster(gridSize)` sets the grid, 2 to 16 cells a side (8) | `*dn.DepthReading`, in meters: `Image`, `Ahead` (the nearest obstacle straight ahead, the floor left out; nil when none is found), `Directions` (the same in 7 strips from left to right, each nil when none), `Ground` (a floor was found and left out), `GridRows`, `GridCols` and `Grid` (row by row from the top left), `DepthMin`, `DepthMax`, `DepthMedian`, and the picture's `Width` and `Height` in pixels. Estimates from one picture, for decisions and planning, never a safety stop |
+| `knowledge` (`dn.BoosterKnowledge`) | No picture: the request's state and questions, against one of your knowledge bases: `dn.KnowledgeBooster(collection, options)`, see [Knowledge](#knowledge) | `*dn.KnowledgeReading`, one per request: the `Passages` that apply, pinned first, each cited by `Item`, `Chunk` and byte offsets |
 | `bynn_segment` (`dn.BoosterSegment`), Segment Vision | Any picture, with what to find: `dn.SegmentBooster(dn.SegmentOptions{Prompts: ...})`, 1 to 4 phrases of at most 120 characters, and `MaxInstances` (1 to 16, 8), `MinScore` (0 to 1, 0.25), `PolygonPoints` (3 to 64, 24) and `Depth` (true) | `*dn.SegmentReading`: `Image`, `Width`, `Height`, `Prompts`, `Instances` by score (each `Label`, the phrase it matched, `Score`, `Box`, `Polygon`, `Area`, `Centroid`, `Opening`, the largest hole it encloses or nil, and with depth on its `Depth` and `SizeM` in meters), `DepthSource` and `AssumedHFOVDeg`. Coordinates are fractions of the picture from its top left; distances and sizes are estimates, never a safety stop |
 
 ```go
@@ -415,7 +417,7 @@ A request's `CustomID` is a pointer so a missing id and an empty one are told ap
 
 ## Collections
 
-A collection holds the faces of the people you enroll, for decisions to search. `client.Collections()` creates, lists, reads and deletes the workspace's collections, and enrolls, lists, edits and deletes their items, each result with its fields as sent and `Raw`:
+A face collection holds the faces of the people you enroll, for decisions to search; a text collection is a knowledge base of your documents (see [Knowledge](#knowledge)). `client.Collections()` creates, lists, reads and deletes the workspace's collections, and enrolls, lists, edits and deletes their items, each result with its fields as sent and `Raw`:
 
 ```go
 col, err := client.Collections().Create(ctx, "Staff, Stockholm office", "")
@@ -433,6 +435,73 @@ item, err = client.Collections().UpdateItem(ctx, col.ID, item.ID, dn.ItemUpdate{
 - `UpdateItem` sends only the fields given: `Reference`, `Label` (or `ClearLabel`, which sends `null` and removes it) and `Metadata`, which replaces the item's whole metadata (an empty map removes every key).
 - `ListItems` pages with `Offset` and `Limit`, and finds the items of one `Reference` or of a `ReferencePrefix`; the page carries `TotalCapped`, `Reference` and `ReferencePrefix` as sent.
 - Checked locally, with the API's entries: a name of 1 to 80 characters, a reference of 1 to 64 of `A-Z a-z 0-9 _ . : -`, a label of 1 to 128 characters, and metadata of at most 20 keys of 1 to 40 of `a-z 0-9 _`, each value a text of at most 500 characters, a number, or true or false. An enrolled image's URL is checked as a decision's.
+
+## Knowledge
+
+A knowledge base is a collection of type `text` holding your own documents: policies, procedures, product sheets, mission briefs. The `knowledge` booster finds the passages that apply to a decision and gives them to the model as facts and rules to apply; the reading cites each one back to its document.
+
+Create one, with an optional scope key (a metadata key whose value scopes a document to a mission, a site or a customer):
+
+```go
+cols := client.Collections()
+kb, err := cols.CreateWith(ctx, dn.CollectionCreate{Name: "Claims policy", Type: dn.CollectionText, ScopeKey: dn.Ptr("mission")})
+```
+
+Add a Markdown policy inline, and a PDF from a path. A file is converted to text; once a version is ready only its text is kept and the original file is deleted. Ingestion is asynchronous: an added document is `queued`, then `processing`, then `ready` or `failed`. `Wait: true` asks the server to hold the call up to 10 s until it is ready, and `WaitUntilReady` polls until it is:
+
+```go
+rule, err := cols.AddDocument(ctx, kb.ID, dn.DocumentText("# Receipts\n\nReject any claim over 500 SEK without a receipt.", ""),
+	dn.DocumentOptions{Title: dn.Ptr("Receipts rule"), Reference: dn.Ptr("receipts"), Pinned: dn.Ptr(true), Wait: true})
+
+doc, err := cols.AddDocument(ctx, kb.ID, dn.DocumentFile("claims-policy-2026.pdf", "", ""), dn.DocumentOptions{})
+doc, err = cols.WaitUntilReady(ctx, kb.ID, doc.ID, dn.WaitOptions{Timeout: 2 * time.Minute})
+if doc.Status == dn.StatusFailed {
+	log.Println("not ingested:", doc.Error)
+}
+```
+
+A document is `dn.DocumentText(text, format)` (Markdown unless `format` is `dn.FormatText`; its title is required), `dn.DocumentFile(path, contentType, filename)`, `dn.DocumentData(bytes, contentType, filename)`, `dn.DocumentReader(r, contentType, filename)` or `dn.DocumentUpload(uploadID)`. A file's type is the content type you give, else its file name's extension, else its first bytes; a DOCX, PPTX or XLSX and a text file need a content type or a file name. A text or Markdown file under the inline threshold is sent as text in one call, titled by its file name without the extension; every other file is uploaded first and then added by its upload id. `client.UploadDocuments(ctx, docs)` uploads up to 16 ahead of time, for `dn.DocumentUpload` within the hour. `ReplaceDocument` replaces a document whole with a new version (the old one serves until the new one is ready), `UpdateItem` changes its `Reference`, `Label`, `Metadata`, `Pinned`, `PinRank` or `Title`, `DeleteItem` deletes it and `DeleteFailedItems` deletes every failed one. `WaitUntilCollectionReady` waits until nothing in the knowledge base is queued or processing.
+
+Pin a rule that must always apply (`Pinned`): it goes to every decision that names the knowledge base, whatever the question. Scope a mission's documents by putting the scope key in their metadata (`Metadata: map[string]any{"mission": "M-42"}`); a document without it is global. Name the value in `Scope` to search that mission's documents and the global ones.
+
+A decision with knowledge, and its passages:
+
+```go
+d, err := client.Decide(ctx, dn.Request{
+	State:     map[string]any{"claim": map[string]any{"amount": "740.00", "receipt": false}, "mission": "M-42"},
+	Questions: dn.Questions{dn.Q("approve", dn.Truth("Should the claim be approved under our policy?"))},
+	Boosters:  []any{dn.KnowledgeBooster(kb.ID, dn.KnowledgeOptions{Scope: dn.Ptr("M-42"), Require: true})},
+})
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(d.Truth("approve").Truth)
+if r, ok := d.Evidence.Get(dn.BoosterKnowledge).Results[0].(*dn.KnowledgeReading); ok {
+	for _, p := range r.Passages {
+		fmt.Println(p.N, p.Pinned, p.Title, p.Heading, p.Item, p.Chunk, p.ByteStart, p.ByteEnd)
+	}
+}
+```
+
+`dn.KnowledgeOptions` takes `Query` (in place of the query built from the questions and the state), `Scope`, `Match` (metadata equality, such as `map[string]any{"region": "SE"}`), `Filter` (a filter tree), `TopK` (0 to 20 passages found besides the pins, 4 by default; 0 gives the pins only), `MaxTokens` (an integer, or `"auto"`), `Pinned` (false leaves the pins out), `MinScore`, `IncludeText` (each passage's text in the reading; a full-scope key) and `Require`. Each is sent only when set and checked by the API. A `*dn.KnowledgeReading` holds `Collection`, `CollectionName`, `Corpus`, `Query`, `Budget`, `Scope`, `Warnings` (such as `scope_not_named` or `over_budget`), `Passages`, `Omitted` (the passages left out, by cause), `PendingItems`, `Search` and `Truncated`. Each passage carries `N`, `Pinned`, `Item`, `Chunk`, `ByteStart`, `ByteEnd`, `Reference`, `Title`, `Heading`, `Tokens`, `Score` (nil for a pin), `Lexical`, `Rendered` and, with `IncludeText`, `Text`. `ByteStart` and `ByteEnd` are UTF-8 byte offsets, end exclusive, into the document's stored text: `cols.GetItem(ctx, kb.ID, p.Item, true)` returns it in `Text`, and `text[p.ByteStart:p.ByteEnd]` is the passage. `ListChunks` shows how a document was cut.
+
+Try a query without a decision with `Search`, which returns the same reading with every passage's text:
+
+```go
+r, err := cols.Search(ctx, kb.ID, "receipts for small claims", dn.SearchOptions{Scope: dn.Ptr("M-42"), TopK: dn.Ptr(5)})
+```
+
+The errors you meet with knowledge:
+
+| Error | When |
+|---|---|
+| `*dn.Error` with status 409 and `ErrorType` `knowledge_collection_empty` | `Require` on a knowledge base with no document ready and none pending (none added, or every one failed); `Details` has `items` and `failed` |
+| `*dn.OverloadedError` (529, `booster_unavailable`) | `Require` while no document is ready yet but some are being processed: retried after its `Retry-After` (5 s). With `Details["reason"]` `ingestion_delayed` (a document queued past 15 minutes, `Retry-After` 60 s) it is returned at once, for you to decide |
+| `*dn.RateLimitError` (429) with `Details["reason"]` `ingest_queue_full` or `ingest_tokens_per_hour` | Adding documents faster than the workspace's ingestion limits; retried after its `Retry-After` |
+| `*dn.RequestTooLargeError` with `ErrorType` `item_too_large` | A document's text over 512 KiB once normalised |
+| `*dn.BadRequestError` with `ErrorType` `collection_type_mismatch` | A face collection named by knowledge or a search |
+
+Supported files: plain text, Markdown, PDF, DOCX, PPTX, XLSX, HTML, PNG, JPEG, TIFF and WebP, up to 50 MB a file and 100 pages a PDF, and 512 KiB of text after extraction. A document's title, reference, pin rank, label and metadata, a file's size and type, and the scope key are checked before anything is sent, with the API's own errors. A knowledge upload, `Search` and `IncludeText` need a full-scope key; any key that may decide may name the booster. A knowledge call costs USD 0.001, one per request whatever it retrieves, and the passages' tokens are input tokens at the model's price.
 
 ## Per-key usage
 
@@ -511,7 +580,7 @@ case errors.As(err, &apiErr):
 | 429 | `*RateLimitError` | `RetryAfter` (capped at 60 s); `Details["reason"]` such as a publishable key's `client_rate` or `in_flight` |
 | 429, `key_spend_cap_reached` | `*RateLimitError`, never retried: the key's daily spend cap resets at 00:00 UTC | `Details` (`resets_at`, `cap`, `spent`) |
 | 429, `session_limit_exceeded` | `*SessionLimitError` (also a `*RateLimitError`), never retried | `RetryAfter` |
-| 529 (also `booster_unavailable`) | `*OverloadedError` | `RetryAfter` (capped at 60 s); never retried when `Details["reason"]` is `enrollment_unpriced` |
+| 529 (also `booster_unavailable`) | `*OverloadedError` | `RetryAfter` (capped at 60 s); never retried when `Details["reason"]` is `enrollment_unpriced` or `ingestion_delayed` |
 | other 5xx | `*ServerError` | |
 | any other status (405, 409, 408 after its retries, ...) | `*Error` with the status | |
 | no response | `*ConnectionError`, `*TimeoutError` | |
@@ -557,11 +626,11 @@ A request whose boosters name `ocr` has 30 seconds per attempt (`dn.OCRTimeout`)
 | `dn.WithAPIKey(key)` | `DECISIONNODE_API_KEY` | none |
 | `dn.WithBaseURL(url)` | `DECISIONNODE_BASE_URL` | `https://api.decisionnode.com` |
 | `dn.WithModel(model)` | `DECISIONNODE_MODEL` | `decisionnode-moe` |
-| `dn.WithTimeout(d)` | | 10 s per attempt (30 s for a request naming `ocr`); must be above 0 |
+| `dn.WithTimeout(d)` | | 10 s per attempt (30 s for a request naming `ocr` and not `knowledge`, 20 s for a document added with `Wait`); must be above 0 |
 | `dn.WithMaxRetries(n)` | | 2; must be 0 or more |
 | `dn.WithHeaders(map)` | | |
 | `dn.WithInlineThreshold(n)` | | 524,288 bytes (`dn.DefaultInlineThreshold`); 0 uploads every local image |
-| `dn.WithUploadTimeout(d)` | | 60 s per storage PUT attempt (`dn.DefaultUploadTimeout`), apart from the API timeout; must be above 0 |
+| `dn.WithUploadTimeout(d)` | | 60 s per image PUT attempt to storage (`dn.DefaultUploadTimeout`) and 120 s per document's (`dn.DefaultDocumentUploadTimeout`), apart from the API timeout; must be above 0 |
 | `dn.WithHTTPClient(c)` | | a client of its own; yours is copied and never follows redirects, and its transport must be `nil` or an `*http.Transport` that keeps TLS checks on |
 | `dn.WithLogger(l)` | | off |
 | `dn.WithResponseHook(f)` | | off |
@@ -578,7 +647,7 @@ An option wins over the environment, and the environment over the default. The b
 DECISIONNODE_CONFORMANCE_DIR=/path/to/decision-node-conformance go test ./...
 ```
 
-The conformance tests run every case of the DecisionNode conformance suite against its mock server, and need `python3` for that server. `DECISIONNODE_CONFORMANCE_DIR` must point at a checkout of the suite: when it is unset the conformance test fails, it is never skipped. To run only the unit tests, pass `-skip TestConformance`. This version passes conformance suite 1.11; CI checks the suite out at the commit named once, in `CONFORMANCE_REF` in `.github/workflows/ci.yml`, with every action pinned to a commit and no credentials left in the checkouts.
+The conformance tests run every case of the DecisionNode conformance suite against its mock server, and need `python3` for that server. `DECISIONNODE_CONFORMANCE_DIR` must point at a checkout of the suite: when it is unset the conformance test fails, it is never skipped. To run only the unit tests, pass `-skip TestConformance`. This version passes conformance suite 1.23; CI checks the suite out at the commit named once, in `CONFORMANCE_REF` in `.github/workflows/ci.yml`, with every action pinned to a commit and no credentials left in the checkouts.
 
 ## License
 

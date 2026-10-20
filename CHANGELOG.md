@@ -4,6 +4,26 @@ All notable changes to this package are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - Unreleased
+
+Implements version 1.4 of the DecisionNode SDK surface: knowledge.
+
+### Added
+
+- Knowledge bases: collections of type `text` (`CollectionText`). `Collections().CreateWith(CollectionCreate{Name, Type, ScopeKey})` creates one with an optional scope key; `Collection` gains `ScopeKey`, `Chunks`, `Tokens`, `Version`, `StatusCounts` and `Pinned` (with `LargestScope`), each as sent and empty on a face collection. Deleting a text collection may answer `Status` "purging" with `Deleted` false, which is success too.
+- Documents: `DocumentText` (Markdown unless `FormatText`), `DocumentFile`, `DocumentData`, `DocumentReader` and `DocumentUpload`; `AddDocument` and `ReplaceDocument` with `DocumentOptions` (`Title`, `Reference`, `Pinned`, `PinRank`, `Label`, `Metadata`, `Wait`), each with an Idempotency-Key, the same on every attempt. A text or Markdown file under the inline threshold that is UTF-8 with no NUL goes inline, titled by its file name's stem; every other file is uploaded with the knowledge purpose (presign with `purpose` and `filename`, the exact PUT, then `upload_id`), and a stale upload this call made is uploaded again once, under a new key. A file's type comes from its content type, its extension or its first bytes. `Client.UploadDocuments` uploads 1 to 16 documents ahead of time. A document's PUT is allowed `DefaultDocumentUploadTimeout` (120 s) unless `WithUploadTimeout` is given, and a call with `Wait` `WaitTimeout` (20 s) per attempt unless `WithTimeout` is given.
+- `CollectionItem` gains a document's fields: `Title`, `Format`, `Pinned`, `PinRank`, `Source`, `File`, `Status`, `Stage`, `Progress`, `Serving`, `Error`, `Delayed`, `Warnings`, `Chunks`, `Tokens`, `ContentSHA256`, `Version`, `QueuedAt`, `ReadyAt` and `Text`. `GetItem` reads one item, with its stored text on request; `ListChunks` pages a document's chunks (`Chunk`, `ChunkPage`); `DeleteFailedItems` deletes every failed document. `ItemUpdate` gains `Pinned`, `PinRank` and `Title`.
+- `WaitUntilReady` and `WaitUntilCollectionReady` poll until a document is ready or failed, or until nothing is queued or processing: the first read at once, then waits from `WaitOptions.PollInterval` (1 s) growing by half up to 10 s, or a 429's or 529's longer Retry-After, until `WaitOptions.Timeout` (300 s), then a `*TimeoutError`. A failed document is returned, not raised.
+- `Collections().Search` returns a `*KnowledgeReading` with every passage's text.
+- The `knowledge` booster: `BoosterKnowledge` and `KnowledgeBooster(collection, KnowledgeOptions)`, each option sent only when set; its reading `*KnowledgeReading` (`Collection`, `CollectionName`, `Corpus`, `Query`, `Budget`, `Scope`, `Warnings`, `Passages`, `Omitted`, `PendingItems`, `Search`, `Truncated`) with `KnowledgePassage`s. A reading or passage with a required field missing or of the wrong type is an `*UnknownReading`. A request naming knowledge keeps the default timeout even when it names `ocr`.
+- The local checks of a knowledge base and its documents, with the API's entries: the type, the scope key, a title of 1 to 200 characters (and a title required for a text), a pin rank from 0 to 1,000, the format, an empty text, a reference and a label in the text route's words; a file over 50 MB, empty, or of a type that is not a knowledge type is a `*BadRequestError` with the presign's message.
+
+### Changed
+
+- `SpecVersion` is `"1.4"`, and the conformance tests run suite 1.23.
+- `Create` takes `CollectionText` as well as `CollectionFace`; any other type is refused with "Input should be 'face' or 'text'".
+- A 529 whose `Details["reason"]` is `ingestion_delayed` is never retried.
+
 ## [0.4.0] - Unreleased
 
 Implements version 1.3 of the DecisionNode SDK surface: boosters and fine-tuned models.

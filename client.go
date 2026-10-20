@@ -59,6 +59,9 @@ type Client struct {
 	inlineThreshold int
 	// uploadTimeout bounds each storage PUT attempt.
 	uploadTimeout time.Duration
+	// uploadTimeoutSet is true when WithUploadTimeout set it, which then
+	// holds for a document's PUT too.
+	uploadTimeoutSet bool
 	// uploads caches uploads by content hash, in memory, for this client only.
 	uploads *uploadCache
 	// now is the time uploads, upload URLs and cache entries are judged by.
@@ -166,8 +169,9 @@ func WithInlineThreshold(n int) Option {
 	}
 }
 
-// WithUploadTimeout sets the time allowed for each attempt of an image's PUT
-// to storage (default 60 s), from sending the bytes to reading the answer,
+// WithUploadTimeout sets the time allowed for each attempt of an image's or a
+// document's PUT to storage (default 60 s for an image, 120 s for a
+// document), from sending the bytes to reading the answer,
 // apart from WithTimeout, which bounds the API's calls. A PUT that outlives it
 // is retried like any upload attempt and is then a *TimeoutError. It must be
 // above 0; anything else is an argument error, returned by Err and by every
@@ -179,6 +183,7 @@ func WithUploadTimeout(d time.Duration) Option {
 			return
 		}
 		c.uploadTimeout = d
+		c.uploadTimeoutSet = true
 	}
 }
 
@@ -851,6 +856,9 @@ type callOptions struct {
 	noRetryAfterTimeout bool
 	// idempotencyKey, when set, is sent as Idempotency-Key on every attempt.
 	idempotencyKey string
+	// retryAfterSeen, when set, receives the longest Retry-After of a 429
+	// or 529 answer to any attempt.
+	retryAfterSeen *time.Duration
 }
 
 // doPayload sends an encoded body (nil for none) with retries and returns the
@@ -877,6 +885,9 @@ func (c *Client) call(ctx context.Context, method, path string, payload []byte, 
 		if err == nil {
 			return resp, nil
 		}
+		if o.retryAfterSeen != nil && (ctx.Err() != nil || attempt >= c.maxRetries || !retryable(err, o.policy)) {
+			noteRetryAfter(o.retryAfterSeen, err, header)
+		}
 		if ctx.Err() != nil || attempt >= c.maxRetries || o.policy == retryNever || !retryable(err, o.policy) {
 			return nil, err
 		}
@@ -890,9 +901,23 @@ func (c *Client) call(ctx context.Context, method, path string, payload []byte, 
 				wait = d
 			}
 		}
+		if o.retryAfterSeen != nil {
+			noteRetryAfter(o.retryAfterSeen, err, header)
+		}
 		if err := c.sleep(ctx, wait); err != nil {
 			return nil, &Error{msg: "the request was canceled", Err: err}
 		}
+	}
+}
+
+// noteRetryAfter keeps the longest Retry-After of a 429 or 529 answer.
+func noteRetryAfter(seen *time.Duration, err error, header http.Header) {
+	var e *Error
+	if header == nil || !errors.As(err, &e) || (e.Status != 429 && e.Status != 529) {
+		return
+	}
+	if d, ok := retryAfter(header); ok && d > *seen {
+		*seen = d
 	}
 }
 
@@ -999,7 +1024,8 @@ func (c *Client) log(ctx context.Context, method, path string, status int, reque
 // For a mutation: 429 and 529 only. For a call with its own Idempotency-Key:
 // as by default, and a 409 idempotency_in_progress. A 429
 // session_limit_exceeded never: the count frees when a session ends, not
-// when time passes. Nor a 429 key_spend_cap_reached.
+// when time passes. Nor a 429 key_spend_cap_reached, nor a 529 whose
+// details.reason is ingestion_delayed.
 func retryable(err error, policy retryPolicy) bool {
 	var sl *SessionLimitError
 	if errors.As(err, &sl) {
@@ -1020,6 +1046,11 @@ func retryable(err error, policy retryPolicy) bool {
 		// A key's daily spend cap resets at 00:00 UTC, its Retry-After
 		// hours away: no retry within a call helps.
 		if e.Status == 429 && e.ErrorType == "key_spend_cap_reached" {
+			return false
+		}
+		// Ingestion is delayed: the wait is an outage, so the caller
+		// decides.
+		if e.Status == 529 && e.Details["reason"] == "ingestion_delayed" {
 			return false
 		}
 		if policy == retryMutation {

@@ -549,6 +549,12 @@ func parseReading(booster string, v any) Reading {
 	if raw == nil {
 		return unknown
 	}
+	if booster == BoosterKnowledge {
+		if r, ok := parseKnowledge(raw); ok {
+			return r
+		}
+		return unknown
+	}
 	image, ok := raw["image"].(string)
 	if !ok {
 		return unknown

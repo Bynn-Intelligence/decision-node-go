@@ -16,8 +16,11 @@
 // request and go inline when small or are uploaded once when large. Videos
 // travel as the frames the caller sampled, each with its time (Video,
 // VideoFrameData). Boosters (Request.Boosters) read the images first and add
-// their readings to the decision as evidence (Decision.Evidence). A
-// workspace's fine-tuned models are named in Model like any other.
+// their readings to the decision as evidence (Decision.Evidence). The
+// knowledge booster (KnowledgeBooster) gives a decision the passages of the
+// workspace's own documents that apply, from a text collection filled with
+// Collections().AddDocument. A workspace's fine-tuned models are named in
+// Model like any other.
 //
 //	client := decisionnode.NewClient() // reads DECISIONNODE_API_KEY
 //
