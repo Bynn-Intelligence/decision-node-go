@@ -20,7 +20,7 @@ Implements version 1.4 of the DecisionNode SDK surface: knowledge.
 
 ### Changed
 
-- `SpecVersion` is `"1.4"`, and the conformance tests run suite 1.25.
+- `SpecVersion` is `"1.4"`, and the conformance tests run suite 1.27.
 - `Create` takes `CollectionText` as well as `CollectionFace`; any other type is refused with "Input should be 'face' or 'text'".
 - A 529 whose `Details["reason"]` is `ingestion_delayed` is never retried.
 
