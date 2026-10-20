@@ -303,3 +303,27 @@ func TestIngestionDelayedNotRetried(t *testing.T) {
 		t.Fatalf("%v after %d attempts", err, rec.count())
 	}
 }
+
+func TestCheckDocumentAndHook(t *testing.T) {
+	srv, rec := server(t, func(w http.ResponseWriter, r *http.Request, n int) { respond(w, 200, readyItem, nil) })
+	var hooked []string
+	c := client(t, srv.URL, dn.WithResponseHook(func(ctx context.Context, r dn.ResponseInfo) { hooked = append(hooked, r.Path) }))
+	cols := c.Collections()
+	var ve *dn.ValidationError
+	if err := cols.CheckDocument(dn.DocumentText("Rule.", ""), dn.DocumentOptions{}); !errors.As(err, &ve) {
+		t.Fatalf("check: %v", err)
+	}
+	var br *dn.BadRequestError
+	if err := cols.CheckDocument(dn.DocumentData([]byte("PK\x03\x04"), "", ""), dn.DocumentOptions{}); !errors.As(err, &br) {
+		t.Fatalf("check file: %v", err)
+	}
+	if err := cols.CheckDocument(dn.DocumentData([]byte("%PDF-1.7"), "", "a.pdf"), dn.DocumentOptions{}); err != nil {
+		t.Fatalf("check pdf: %v", err)
+	}
+	if rec.count() != 0 {
+		t.Fatalf("%d requests were sent", rec.count())
+	}
+	if _, err := cols.WaitUntilReady(context.Background(), "col_1", "itm_1", dn.WaitOptions{}); err != nil || len(hooked) != 1 {
+		t.Fatalf("wait: %v, hooked %v", err, hooked)
+	}
+}

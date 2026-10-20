@@ -223,11 +223,30 @@ func (s *CollectionService) ReplaceDocument(ctx context.Context, collectionID, i
 	return s.sendDocument(ctx, http.MethodPut, collectionPath(collectionID)+"/items/"+url.PathEscape(itemID), doc, o)
 }
 
-func (s *CollectionService) sendDocument(ctx context.Context, method, path string, doc Document, o DocumentOptions) (*CollectionItem, error) {
-	c := s.c
-	if c.err != nil {
-		return nil, c.err
+// CheckDocument runs every local check AddDocument and ReplaceDocument would
+// run on doc and o, and returns the same error, sending and uploading
+// nothing; nil means the call would send it. A file is read to be checked,
+// so a Document made with DocumentReader is used up by it.
+func (s *CollectionService) CheckDocument(doc Document, o DocumentOptions) error {
+	if s.c.err != nil {
+		return s.c.err
 	}
+	_, err := s.c.prepareDocument(doc, o)
+	return err
+}
+
+// preparedDocument is a checked document: its text when it goes inline, else
+// its file to upload or the caller's upload id, and its title.
+type preparedDocument struct {
+	inline       bool
+	text, format string
+	file         *docFile
+	title        *string
+}
+
+// prepareDocument reads a document and runs the local checks of its content
+// and fields.
+func (c *Client) prepareDocument(doc Document, o DocumentOptions) (*preparedDocument, error) {
 	var file *docFile
 	inline := false
 	text, format := "", ""
@@ -279,6 +298,19 @@ func (s *CollectionService) sendDocument(ctx context.Context, method, path strin
 	if len(entries) > 0 {
 		return nil, localValidation(reason, entries...)
 	}
+	return &preparedDocument{inline: inline, text: text, format: format, file: file, title: title}, nil
+}
+
+func (s *CollectionService) sendDocument(ctx context.Context, method, path string, doc Document, o DocumentOptions) (*CollectionItem, error) {
+	c := s.c
+	if c.err != nil {
+		return nil, c.err
+	}
+	pd, err := c.prepareDocument(doc, o)
+	if err != nil {
+		return nil, err
+	}
+	inline, text, format, file, title := pd.inline, pd.text, pd.format, pd.file, pd.title
 	query := ""
 	opts := callOptions{policy: retryIdempotent}
 	if o.Wait {
