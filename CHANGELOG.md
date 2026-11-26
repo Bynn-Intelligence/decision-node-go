@@ -4,6 +4,18 @@ All notable changes to this package are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - Unreleased
+
+Implements version 1.5 of the DecisionNode SDK surface: the image and video shares of the input tokens, so callers can bill or budget vision tokens at their own price.
+
+### Added
+
+- `Usage.ImageTokens` and `Usage.VideoTokens` (`*int`): the share of `Usage.InputTokens` that came from images and from videos, read from the `x-decisionnode-image-tokens` and `x-decisionnode-video-tokens` response headers on every call that returns a `Decision`. Each is nil when its header is absent (the server sends it only for a request with images or videos), empty, or not a whole number from 0 to 2^31 - 1 after trimming spaces; such a header never fails the decision. Both are read as sent, never added to or taken from another count and never priced. A batch result's decision reads nil, since its line carries no such headers. `Raw` is unchanged.
+
+### Changed
+
+- `SpecVersion` is `"1.5"`, and the conformance tests run suite 1.28.
+
 ## [0.5.0] - Unreleased
 
 Implements version 1.4 of the DecisionNode SDK surface: knowledge.

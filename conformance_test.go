@@ -674,6 +674,8 @@ func normDecision(d *dn.Decision) any {
 		"latency_ms": latency,
 		"usage": map[string]any{
 			"input_tokens":   intOrNil(d.Usage.InputTokens),
+			"image_tokens":   intOrNil(d.Usage.ImageTokens),
+			"video_tokens":   intOrNil(d.Usage.VideoTokens),
 			"output_tokens":  intOrNil(d.Usage.OutputTokens),
 			"video_frames":   intOrNil(d.Usage.VideoFrames),
 			"video_seconds":  floatOrNil(d.Usage.VideoSeconds),

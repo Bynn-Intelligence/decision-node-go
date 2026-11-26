@@ -309,7 +309,7 @@ func TestFineTunedModels(t *testing.T) {
 }
 
 func TestSpecVersion(t *testing.T) {
-	if dn.SpecVersion != "1.4" {
+	if dn.SpecVersion != "1.5" {
 		t.Fatal(dn.SpecVersion)
 	}
 }

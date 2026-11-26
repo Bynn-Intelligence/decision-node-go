@@ -58,7 +58,18 @@ type Fallback struct {
 // boosters, what was read of them. A value the server did not send is nil,
 // never 0.
 type Usage struct {
-	InputTokens  *int `json:"input_tokens"`
+	InputTokens *int `json:"input_tokens"`
+	// ImageTokens is the share of InputTokens that came from images, from
+	// the x-decisionnode-image-tokens header of a decision, as sent: never
+	// added to or taken from another count, and never priced. Nil for a
+	// request without images (the server sends the header only when the
+	// share is above 0), and when the header is not a whole number from 0 to
+	// 2^31 - 1. Never read from a body.
+	ImageTokens *int `json:"-"`
+	// VideoTokens is the share of InputTokens that came from videos, from
+	// the x-decisionnode-video-tokens header, read as ImageTokens is. Nil for
+	// a request without videos.
+	VideoTokens  *int `json:"-"`
 	OutputTokens *int `json:"output_tokens"`
 	// VideoFrames is the number of frames read over all the videos. Nil for
 	// a request without videos.
@@ -471,6 +482,8 @@ func parseDecision(body []byte, header http.Header) (*Decision, error) {
 	if served := strings.TrimSpace(header.Get("x-decisionnode-fallback")); served != "" {
 		d.Fallback = &Fallback{ServedModel: served, RequestedModel: strings.TrimSpace(header.Get("x-decisionnode-requested-model"))}
 	}
+	d.Usage.ImageTokens = tokenHeader(header, "x-decisionnode-image-tokens")
+	d.Usage.VideoTokens = tokenHeader(header, "x-decisionnode-video-tokens")
 	if v := strings.TrimSpace(header.Get("x-decisionnode-latency-ms")); v != "" {
 		if ms, err := strconv.ParseFloat(v, 64); err == nil {
 			d.LatencyMs = &ms
@@ -480,6 +493,30 @@ func parseDecision(body []byte, header http.Header) (*Decision, error) {
 		d.Answers[id] = parseAnswer(data)
 	}
 	return d, nil
+}
+
+// maxHeaderTokens is the largest token count a header may carry, 2^31 - 1.
+const maxHeaderTokens = 1<<31 - 1
+
+// tokenHeader reads a token count from a header: ASCII digits only after
+// trimming spaces, from 0 to 2^31 - 1. Anything else (absent, empty, a sign,
+// a fraction, too large) is nil, never an error.
+func tokenHeader(header http.Header, name string) *int {
+	v := strings.TrimSpace(header.Get(name))
+	if v == "" {
+		return nil
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] < '0' || v[i] > '9' {
+			return nil
+		}
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n > maxHeaderTokens {
+		return nil
+	}
+	tokens := int(n)
+	return &tokens
 }
 
 // parseAnswer reads one answer. An answer of a known type whose fields are
